@@ -1,0 +1,46 @@
+*.iml
+.gradle/
+build/
+.kotlin/
+/local.properties
+/.idea/
+.DS_Store
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# 签名材料：绝不入库
+*.keystore
+*.jks
+*.pepk
+
+# 信令服务
+server/node_modules/
+# soak 运行时数据（CSV/日志按时间戳落盘，不入库；要留档的结论抄进 docs）
+server/_soak/
+# 真实配置（含 TURN_STATIC_AUTH_SECRET）：只提交 config.example.env
+server/.env
+server/.env.*
+!server/config.example.env
+server/test/.env.smoke
+.env.bak
+.env.*.bak
+*.env.bak
+
+# 编辑器 / 系统
+.vscode/
+Thumbs.db
+desktop.ini
+
+# 构建产物
+app/build/
+app/release/
+*.apk
+*.aab
+# 部署包（server 上云用，见 docs/信令服务上云部署手册.md）
+dist/
+
+# 桌面端开发态数据（library.json / settings.json / logs / 单实例锁）。
+# 打包产物里的 data\ 由 releaseZip 的 exclude 排除，这里管的是仓库工作区这一份。
+desktopApp/data/

@@ -1,0 +1,138 @@
+[versions]
+# 版本基线见《技术方案评审》§3.5，改动前先读那一节。
+agp = "8.7.3"
+kotlin = "2.1.21"
+
+compileSdk = "35"
+minSdk = "35"        # 依据 Q6：两台目标设备最低就是 Android 15
+targetSdk = "35"     # 有意停在 35，见 §3.5「targetSdk 有意停在 35」
+
+media3 = "1.8.1"
+
+# 许可音频编码（DTS / DTS-HD / TrueHD / AC-3 / E-AC-3 …）的软解扩展（2026-10-09 加）。
+#
+# ── 为什么不是官方制品 ────────────────────────────────────────────────────────
+# **官方不发布预编译 AAR**：`androidx.media3:media3-decoder-ffmpeg` 在 Google Maven 的
+# `androidx.media3` 分组索引里根本不存在，在 Maven Central 上直接 404 —— 官方口径是
+# 「自行用 NDK 编」（exoplayer.dev/supported-formats 原文：software decoder extensions
+# 「must be manually built and included」）。本机没有 NDK / CMake / LLVM（实测
+# `%LOCALAPPDATA%\Android\Sdk` 下三者皆无），自编不成，于是取 Jellyfin 的同源构建。
+#
+# ── 选它的三个硬理由 ──────────────────────────────────────────────────────────
+#  1. **沿用 AOSP 原始包名** `androidx.media3.decoder.ffmpeg`（不是另起一套 API），所以
+#     `DefaultRenderersFactory` 的 `Class.forName` 反射能直接命中，不必自写 RenderersFactory。
+#     实测 media3-exoplayer 1.8.1 找的就是这个类名 + 三参构造
+#     `(Handler, AudioRendererEventListener, AudioSink)`，与该包签名字节级一致。
+#  2. **解码器确实编进去了**：arm64-v8a 的 `libffmpegJNI.so` 里实测有 `ff_dca_decoder`
+#     （DTS）与 `ff_mlp_decoder`（TrueHD）符号；视频解码器没编，所以 `.so` 只有 1.4 MB。
+#  3. 它声明的 media3 版本是 **1.8.0**，与本项目 `media3 = 1.8.1` 同一条补丁线，Gradle
+#     会解到 1.8.1。
+#
+# ⚠️ **升 media3 时必须同步确认这一行** —— 它与 media3 版本耦合，跨小版本（1.8 → 1.9）
+# 可能撞上被改掉的构造签名（那时症状是启动即崩 `Error instantiating FFmpeg extension`）。
+# ⚠️ 该制品 POM 的 license 字段是 **GPL-3.0**（包里含 FFmpeg 二进制）。自己装自己用没有
+# 约束；**一旦对外分发 APK，需按 GPL-3.0 提供源码** —— 这条要知情。
+media3Ffmpeg = "1.8.0+1"
+
+webrtc = "150.7871.01"
+
+# 桌面端的 WebRTC（W7）。`webrtc-java` 是 libwebrtc 的 JNI 绑定，**与 Android 的
+# `io.github.webrtc-sdk:android` 不是同一个制品**，两条车道各用各的。
+# 0.14.0 是 Phase 0 做完整套 spike（headless ADM + CustomAudioSource + 关麦释放）的版本，
+# 换版本前先回头看 `docs/Windows-音频独立进程-设计.md` 里按字节码核过的那些 API。
+# ⚠️ 许可证：本地 pom 没写 license 字段、jar 里也没有 LICENSE 文件，落地前按仓库确认
+# （预期 Apache-2.0，**未核实**）—— C6 打包前必须核实，见 W7 拆分 §4/R5。
+webrtcJava = "0.14.0"
+
+# 播放内核（2026-10-26 换引擎，动因与代价见《技术方案评审》§6.9）。
+#
+# ── 为什么**停在 3.7.2**（不是最新版）────────────────────────────────────────
+# `3.7.3` 的 AAR 元数据是 `minCompileSdk=37`、`3.7.4`～`3.7.7` 是 **36**，而本项目的
+# `compileSdk` **有意锁在 35**（AGP 8.7.3 的上限，见 §3.5；本机 `platforms/` 下也只有
+# android-35 与 android-37.0，没有 36）。实测 `3.7.2` 是 `minCompileSdk=1` 的最后一个
+# 版本 —— 它不是「随便挑的旧版」，而是「还能配合本项目 SDK 基线的最新版」。
+# 哪天把 AGP/compileSdk 抬到 36+，这一行才可以往上走。
+#
+# ── 为什么是这个制品 ─────────────────────────────────────────────────────────
+# `libvlc-all` 是一个 AAR 里装齐全部 ABI + 全套 demuxer/decoder + libass + PGS
+# 渲染的那个；它的 POM 声明 **LGPL-2.1**（动态链接、`.so` 独立打进包即可满足分发
+# 义务）。实测 AAR **87.52 MB**（91,771,191 字节），其中 arm64 的
+# `libvlc.so` 43.16 MB + `libc++_shared.so` 8.81 MB + `libvlcjni.so` 0.09 MB ——
+# 另外三个 ABI 由 app 的 `abiFilters += "arm64-v8a"` 挡在包外。
+#
+# ── 为什么不再需要 media3 的软解扩展 ─────────────────────────────────────────
+# libVLC 自带 FFmpeg，DTS / TrueHD / AC-3 这些许可编码本来就能解。但 `0.1.22`
+# **不动**那条依赖：`Media3PlaybackTarget` 是可回退的基线，两套引擎都完整保留到
+# VLC 真机验收通过为止（§6.9 末「刻意保留」）。
+libvlc = "3.7.2"
+
+# 阶段一 1.3 新增：信令客户端的 WebSocket 实现。# **Android 上没有java.net.http** —— 实测本机 `platforms/android-35/android.jar` 里
+# `java/net/http/*` 条目数为 0，`WebSocket` 类也一个都没有（与 minSdk 无关，
+# 是整个包不在 Android 运行时里）。所以 JDK 11 那套 WS 客户端不成立，
+# 必须用第三方实现。选 OkHttp 4.12.0：Android 上事实标准，API 稳定，
+# 且它能给出「握手失败 / 正常关闭 / 异常关闭」的可靠区分 —— 退避重连要靠这个。
+okhttp = "4.12.0"
+junit = "4.13.2"
+
+# 阶段一 1.2 新增。均取与 Kotlin 2.1.21 / compileSdk 35 同期的稳定版，
+# 不追最新 —— 更新的 androidx 制品会要求 compileSdk 36，而 AGP 8.7 封顶 35（§3.5）。
+coroutines = "1.10.2"
+serialization = "1.8.1"
+composeBom = "2025.05.01"
+activityCompose = "1.10.1"
+
+# ── Windows 桌面（W1–W6）─────────────────────────────────────────────────
+# Compose Desktop 与 Android 的 Compose 同属 Kotlin 2.1.21 线；版本取 Phase 0
+# 实测通过（Demo 1/3）的 1.8.2，不追新。
+composeDesktop = "1.8.2"
+# vlcj 4.12.1 —— POM 声明 **GPLv3**（Phase 0 报告 §3.4 已记录：自用不分发可接受，
+# 对外分发要么按 GPLv3 提供源码，要么换 LGPL 的绑定）。
+vlcj = "4.12.1"
+slf4j = "2.0.16"
+
+[libraries]
+androidx-media3-exoplayer = { module = "androidx.media3:media3-exoplayer", version.ref = "media3" }
+androidx-media3-ui = { module = "androidx.media3:media3-ui", version.ref = "media3" }
+# 软解扩展，选型理由见上面 `media3Ffmpeg` 版本注释。只有 Maven Central 有（Google Maven 没有）。
+jellyfin-media3-ffmpeg-decoder = { module = "org.jellyfin.media3:media3-ffmpeg-decoder", version.ref = "media3Ffmpeg" }
+webrtc-android = { module = "io.github.webrtc-sdk:android", version.ref = "webrtc" }
+# 桌面端：API jar + Windows x86_64 原生库（两份都要，缺 native 会在 `NativeLoader` 处失败）。
+webrtc-java = { module = "dev.onvoid.webrtc:webrtc-java", version.ref = "webrtcJava" }
+# ⚠️ Windows 原生库那个制品带 classifier（`:windows-x86_64`），而**版本目录不支持 classifier**，
+# 所以它不在目录里 —— 在 `desktop/rtc/build.gradle.kts` 用显式坐标拼（版本仍取自本文件）。
+# 播放内核，选型与许可说明见上面 `libvlc` 那一段。
+libvlc-all = { module = "org.videolan.android:libvlc-all", version.ref = "libvlc" }
+okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
+
+# 测试专用（只在 test 源集）。mockwebserver 支持 `withWebSocketUpgrade`，
+# 所以信令客户端的重连/resume 逻辑可以在 JVM 上真跑，不必等真机。
+junit = { module = "junit:junit", version.ref = "junit" }
+okhttp-mockwebserver = { module = "com.squareup.okhttp3:mockwebserver", version.ref = "okhttp" }
+
+# 接缝用：StateFlow / SharedFlow（§3.1 异步）与 payload 透传（§3.1 序列化）
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
+
+# UI 栈（§3.1 定为 Jetpack Compose）。material3 与 ui 的版本由 BOM 统一。
+compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
+compose-material3 = { module = "androidx.compose.material3:material3" }
+compose-ui = { module = "androidx.compose.ui:ui" }
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
+
+# ── Windows 桌面（W1–W6）─────────────────────────────────────────────────
+vlcj = { module = "uk.co.caprica:vlcj", version.ref = "vlcj" }
+# Compose 的桌面主线程调度器：`Dispatchers.Main` 在 Swing/AWT 上要靠它。
+kotlinx-coroutines-swing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "coroutines" }
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+# Compose Desktop（JVM）。与 kotlin-compose（编译器插件）是两个东西，两者都要。
+compose-desktop = { id = "org.jetbrains.compose", version.ref = "composeDesktop" }
