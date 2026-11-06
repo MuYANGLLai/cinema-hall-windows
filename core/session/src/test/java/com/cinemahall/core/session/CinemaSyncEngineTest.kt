@@ -465,6 +465,54 @@ class CinemaSyncEngineTest {
     }
 
     @Test
+    fun 成员按播放时房主按自己的位置重新广播全场对齐() {
+        // 2026-11-06 用户口径：「当有人点击播放时，把所有人的播放状态跟房主同步，
+        // 比如播放进度，而不是只广播一次开始播放的命令」。
+        // 旧实现把成员报上来的 positionMs 当新锚点 ⇒ 谁按播放，全场就被拉到**谁那台**
+        // 的进度上，两人一按就错位一次。
+        val member = UserId("member-b")
+        engine.setMyUserId(UserId("me"))
+        engine.setHostUserId(UserId("me"))          // 本机是房主
+        engine.setControlPolicy(ControlPolicy(defaultAllow = true))
+        // 「在看」是控制权的第二个条件（策略表：allow && 在看）—— 不设的话房主会把
+        // 这条 play 当成「没权限的人发来的」直接丢掉，测试就测不到位置语义了。
+        engine.setPeerWatching(member, true)
+        engine.setRole(true)
+        engine.onLinkOpened()
+
+        now = 20_000L
+        player.play()                               // 房主从 0 开始播
+        now = 80_000L                               // 60 秒之后
+        engine.onTick(now)
+        sent.clear()
+
+        // 成员在它自己那台的 5 秒处按了播放
+        engine.onRemote(
+            CinemaPlayback.ACTION_PLAY,
+            Envelope(
+                type = CinemaPlayback.TYPE_PLAY,
+                seq = 99L,
+                roomId = "AB23CD",
+                from = member.value,
+                sentAtMs = now,
+                payload = CinemaPlaybackCodec.encodePosition(
+                    CinemaPosition(positionMs = 5_000L, senderClockMs = now),
+                ),
+            ),
+        )
+
+        val play = sent.firstOrNull { it.first == CinemaPlayback.TYPE_PLAY }
+        assertTrue("房主必须重新广播一条 play，让全场按它的进度对齐", play != null)
+        assertEquals(
+            "广播出去的必须是**房主**的位置（约 60 秒），不是成员报的 5 秒",
+            60_000L,
+            CinemaPlaybackCodec.decodePosition(play!!.second)!!.positionMs,
+        )
+        assertEquals("房主自己的锚点不能被成员的位置覆盖", 60_000L, engine.status.value.anchoredMediaMs)
+        assertEquals("房主继续在播", true, player.isPlayRequested)
+    }
+
+    @Test
     fun 片源没就绪时绝不硬_seek() {
         // 2026-11-06 真机「windows 卡死」的形状：从端刚 `prepare()` 一部 5GB x265 MKV，
         // 位置还是 0；房主的心跳说它在 819804 ms。漂移算出 −822805 ms ⇒ 硬阈值 ⇒

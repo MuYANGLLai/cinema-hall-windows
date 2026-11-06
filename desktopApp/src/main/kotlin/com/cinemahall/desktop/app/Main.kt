@@ -13,6 +13,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.cinemahall.desktop.app.account.DesktopAccount
@@ -42,6 +43,7 @@ import javax.imageio.ImageIO
  * --no-autoplay         选片但不自动播放
  * --exit-after=<sec>    跑 N 秒后自动退出（冒烟/门禁脚本用）
  * --screenshot=<path>   退出前抓一张窗口截图（同上）
+ * --fullscreen          启动即全屏（同上：脚本按不了 F11）
  * ```
  */
 fun main(args: Array<String>) {
@@ -237,7 +239,24 @@ fun main(args: Array<String>) {
 
         val windowState = rememberWindowState(
             size = DpSize(settings.windowWidth.dp, settings.windowHeight.dp),
+            // 初始 placement 也带上：只靠下面的 `LaunchedEffect` 时，开机即全屏这条路
+            // 要等第一次重组后才生效，而全屏的**边框/标题栏**那一刻已经按浮动窗口画好了。
+            placement = if (options.startFullscreen) WindowPlacement.Fullscreen else WindowPlacement.Floating,
         )
+
+        // 全屏是**窗口级**状态（与安卓端 `fullscreen` 由外层持有同一条取向）：
+        // 收起来的不仅是画面里的控件，还有左侧导航与右侧成员栏 —— 否则「全屏」
+        // 只是把画面放大到两条栏之间，上下黑边永远补不匀。
+        // Esc 也退出全屏（Windows 用户的肌肉记忆），与按钮、F11 三条路并存。
+        var fullscreen by remember { mutableStateOf(options.startFullscreen) }
+        LaunchedEffect(fullscreen) {
+            val wanted =
+                if (fullscreen) WindowPlacement.Fullscreen else WindowPlacement.Floating
+            if (windowState.placement != wanted) {
+                windowState.placement = wanted
+                Log.info("[ui] 全屏=$fullscreen → placement=${windowState.placement}")
+            }
+        }
 
         Window(
             onCloseRequest = {
@@ -270,6 +289,18 @@ fun main(args: Array<String>) {
                         Key.O -> {
                             if (event.isCtrlPressed) {
                                 Shortcuts.onOpenFile(); true
+                            } else {
+                                false
+                            }
+                        }
+                        // 全屏：F11 与 Esc 都要能进出。Esc 只在全屏时接管，
+                        // 非全屏时放行给控件（否则会吃掉对话框的关闭键）。
+                        Key.F11 -> {
+                            fullscreen = !fullscreen; true
+                        }
+                        Key.Escape -> {
+                            if (fullscreen) {
+                                fullscreen = false; true
                             } else {
                                 false
                             }
@@ -307,6 +338,8 @@ fun main(args: Array<String>) {
                     },
                     identityOverride = options.identity,
                     endpointOverride = options.signalEndpointOverride,
+                    fullscreen = fullscreen,
+                    onToggleFullscreen = { fullscreen = !fullscreen },
                 )
             }
 
@@ -424,6 +457,8 @@ private data class StartupOptions(
      * 会变成：激活打在本机，界面却去连生产 —— 两端对不上，且门禁还以为自己连的是本机。
      */
     val signalEndpointOverride: String?,
+    /** 门禁用：启动即全屏。与 `--screen=` 同类 —— 截图脚本没法按 F11。 */
+    val startFullscreen: Boolean,
     /** C5 自检用的固定房号。 */
     val roomId: String,
     val rtcPort: Int,
@@ -435,6 +470,7 @@ private data class StartupOptions(
             "rtcSelfTest=${rtcSelfTest ?: "-"} rtcCallTest=${rtcCallTest ?: "-"} " +
             "rtcTone=$rtcTone roomTest=${roomTest ?: "-"} sessionTest=${sessionTest ?: "-"} " +
             "roomId=$roomId screen=${initialScreen ?: "home"} cinemaCreate=$cinemaCreate " +
+            "fullscreen=$startFullscreen " +
             "cinemaJoin=${cinemaJoin ?: "-"} identity=${identity ?: "-"} " +
             "activate=${activateCode != null} deviceName=${deviceName ?: "-"} " +
             "nickname=${nickname ?: "-"} " +
@@ -460,6 +496,7 @@ private data class StartupOptions(
                 roomTest = value("--room-test")?.takeIf { it.isNotBlank() },
                 sessionTest = value("--session-test")?.takeIf { it.isNotBlank() },
                 initialScreen = value("--screen")?.takeIf { it.isNotBlank() },
+                startFullscreen = args.contains("--fullscreen"),
                 cinemaCreate = args.contains("--cinema-create"),
                 cinemaJoin = value("--cinema-join")?.takeIf { it.isNotBlank() },
                 identity = value("--identity")?.takeIf { it.isNotBlank() },

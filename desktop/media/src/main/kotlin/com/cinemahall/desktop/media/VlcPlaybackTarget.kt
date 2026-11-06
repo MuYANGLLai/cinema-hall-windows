@@ -74,6 +74,10 @@ class VlcPlaybackTarget(
     @Volatile
     private var subtitleNames: List<String> = emptyList()
 
+    /** 当前在用的字幕轨 id（`-1` = 关）。[currentSubtitleIndex] 由它换算。 */
+    @Volatile
+    private var currentSubtitleId: Int = -1
+
     @Volatile
     private var currentVolume: Float = PlaybackTarget.DEFAULT_VOLUME
 
@@ -317,6 +321,28 @@ class VlcPlaybackTarget(
         }
     }
 
+    /**
+     * 「回到页面时画面丢了」的兜底：把播放器重新叫起来。
+     *
+     * 切页会摘掉视频输出（现在已改成不摘，但历史上摘过；用户机器上也可能因为
+     * 显卡驱动重排 vout 而丢）。判据在调用方：`isPlayRequested && !isPlaying`。
+     * 这里只做一件最轻的事：**续播**（`controls().play()`），不重开、不 seek ——
+     * 位置由同步引擎在下一拍校准，重开反而会把位置打回 0。
+     */
+    fun resumeIfOutputLost() {
+        control.execute {
+            if (closed.get()) return@execute
+            val state = runCatching { player.status().state() }.getOrNull()
+            log("[vlc] 画面恢复：state=$state，尝试续播")
+            if (mediaPrepared || mediaLoaded) {
+                runCatching { player.controls().setPause(false) }
+                    .recoverCatching { player.controls().play() }
+            } else {
+                currentUri?.let { uri -> runCatching { player.media().play(uri) } }
+            }
+        }
+    }
+
     override fun setSpeed(speed: Float) {
         // 变速同样会重建视频输出（部分编码下等于一次重新起播），一并挪到控制线程。
         control.execute {
@@ -325,9 +351,61 @@ class VlcPlaybackTarget(
         }
     }
 
+    /**
+     * 选字幕。
+     *
+     * ── 为什么要读回校验 + 重试（2026-11-06 用户报「只能解析出有字幕，选不中」）──────
+     * `libvlc_video_set_spu` 在**轨道表还没稳定**时返回 -1 或返回一个旧 id，而调用本身
+     * 不抛异常 —— 旧实现只要返回值 ≥ 0 就当成成功，于是界面点了菜单、日志里什么都没有、
+     * 画面上字幕不变。这里改成：
+     *   1. 调用后读 `subpictures().track()`，**读回来等于目标 id 才算生效**；
+     *   2. 不相等就刷新轨道表重试（起播后的头一两秒轨道表才齐），最多 4 次；
+     *   3. 每次尝试都写一行日志 —— 「点不动」必须能在 app.log 里看到原因。
+     */
     override fun selectSubtitleTrack(trackIndex: Int) {
-        if (trySubtitle(trackIndex)) return
-        pending.requestSubtitle(trackIndex)
+        control.execute {
+            if (closed.get()) return@execute
+            val id = subtitleIds.getOrNull(trackIndex)
+            if (id == null) {
+                log("[vlc] 字幕选择失败：index=$trackIndex 不在当前 ${subtitleIds.size} 条轨道里")
+                return@execute
+            }
+            applySubtitle(id, trackIndex)
+        }
+    }
+
+    /**
+     * 关掉字幕。**桌面端口的扩展**（通用 `PlaybackTarget` 只认「选第几条」，`-1` 的语义
+     * 各平台不一致，所以不往共享端口上加）。
+     */
+    fun disableSubtitles() {
+        control.execute { if (!closed.get()) applySubtitle(-1, -1) }
+    }
+
+    /** 当前选中的字幕下标；`-1` = 关。界面用它把「正在用哪条」画出来。 */
+    val currentSubtitleIndex: Int
+        get() = subtitleIds.indexOf(currentSubtitleId)
+
+    private fun applySubtitle(id: Int, index: Int) {
+        var applied = -1
+        repeat(4) { attempt ->
+            applied = runCatching { player.subpictures().setTrack(id) }.getOrDefault(-1)
+            val current = runCatching { player.subpictures().track() }.getOrDefault(-2)
+            log(
+                "[vlc] 字幕 setTrack(index=$index, id=$id) → 返回 $applied，" +
+                    "当前 $current（第 ${attempt + 1} 次）",
+            )
+            if (current == id) {
+                currentSubtitleId = id
+                refreshTracks()
+                return
+            }
+            // 轨道表可能还没稳定：重新拉一次再试。
+            refreshTracks()
+            runCatching { Thread.sleep(150L * (attempt + 1)) }
+        }
+        if (index >= 0) pending.requestSubtitle(index)
+        log("[vlc] 字幕 id=$id 没生效（返回 $applied），已排队等下一次事件重放")
     }
 
     override fun setVolume(volume: Float) {
@@ -353,11 +431,17 @@ class VlcPlaybackTarget(
         val awt = surface as? AwtPlaybackSurface ?: return
         // AWT 的 heavyweight Canvas 要等 isShowing 才拿得到稳定的 HWND；Compose 的组合
         // 时机早于它。Phase 0 §2.1 的做法是轮询最多 5 秒（不是 sleep 一次就挂）。
+        //
+        // ── 光等 `isShowing` 不够（2026-11-06 实测）────────────────────────────
+        // `SwingPanel` 把 panel 放进 Compose 的容器时有那么几十毫秒：组件已显示、
+        // 尺寸却还是 `0x0`（现场日志：`surface attach ... ok size=0x0`）。以这个尺寸
+        // 挂上去，libVLC 的 vout 按零尺寸初始化，之后窗口变大也不会补画 ——
+        // 症状就是「按了播放没反应 / 黑屏」。所以判据必须是「显示 **且** 有尺寸」。
         Thread({
             val deadline = System.nanoTime() + 8_000_000_000L
             var waited = 0L
             while (System.nanoTime() < deadline && !closed.get()) {
-                if (awt.canvas.isShowing) {
+                if (awt.canvas.isShowing && awt.canvas.width > 0 && awt.canvas.height > 0) {
                     val result = runCatching {
                         player.videoSurface().set(factory.videoSurfaces().newVideoSurface(awt.canvas))
                         player.videoSurface().attachVideoSurface()
@@ -433,6 +517,8 @@ class VlcPlaybackTarget(
         // trackDescriptions 的第一条通常是 Disable（id=-1）；界面只列真实字幕轨。
         val real = descriptions.filter { it.id() >= 0 }
         subtitleIds = real.map { it.id() }
+        // 当前在用的那条：界面要能把它标出来（不然「选没选中」只能靠猜）。
+        currentSubtitleId = runCatching { player.subpictures().track() }.getOrDefault(-1)
         val names = real.map { description ->
             // VLC 的 description 形如 "Track 1 - [Chinese]"；取方括号里的语言名，
             // 没有方括号就留空串（契约允许“该轨没标语言”）。

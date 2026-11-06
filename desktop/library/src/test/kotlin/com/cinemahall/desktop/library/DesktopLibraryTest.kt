@@ -151,8 +151,33 @@ class DesktopMovieCatalogTest {
     }
 
     @Test
-    fun `扫描 500 个文件应在可接受时间内完成`() {
-        val root = temp.newFolder("Big")
+    fun `重启后影片列表仍在_不必重新扫描`() {
+        val root = temp.newFolder("Movies")
+        file(root, "film-a.mkv")
+        val nested = File(root, "2024").apply { mkdirs() }
+        file(nested, "film-b.mkv")
+
+        val store = File(temp.root, "library.json")
+        val first = DesktopMovieCatalog(store, probe = { 95L * 60 * 1000 })
+        first.addRoot(root)
+        kotlinx.coroutines.runBlocking { first.scan() }
+        assertEquals(2, first.movies.value.size)
+
+        // 新实例 = 下一次启动：只读盘，**不扫描**，列表必须已经在那儿。
+        // 早先只存根目录与时长缓存，用户上次扫过的片在下次启动时全消失（「0 部」），
+        // 看起来像库被清空了 —— 安卓端是持久化的，两端行为必须一致。
+        val reopened = DesktopMovieCatalog(store, probe = { 0L })
+        assertEquals("film-a.mkv", reopened.movies.value.first().fileName)
+        assertEquals(
+            listOf("film-a.mkv", "film-b.mkv"),
+            reopened.movies.value.map { it.fileName },
+        )
+        assertTrue("时长也要一起活下来", reopened.movies.value.all { it.durationMs == 95L * 60 * 1000 })
+        assertEquals(1, reopened.roots.value.size)
+    }
+
+    @Test
+    fun `扫描 500 个文件应在可接受时间内完成`() {        val root = temp.newFolder("Big")
         repeat(500) { index ->
             val bucket = File(root, "cat${index % 10}").apply { mkdirs() }
             file(bucket, "movie-$index.mkv", bytes = 8)

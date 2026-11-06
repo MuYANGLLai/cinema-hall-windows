@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -17,10 +18,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -40,9 +46,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.cinemahall.core.library.ScanBucket
 import com.cinemahall.core.model.UserId
@@ -181,6 +189,14 @@ fun AppRoot(
      * 于是「从端是不是被引擎拉起来的」这类验证全变成了假阳性 —— 从端自己就播了。
      */
     initialAutoplay: Boolean = true,
+    /**
+     * 是否全屏（窗口级状态由 `Main` 的 `WindowState.placement` 承载）。
+     *
+     * 全屏时左栏导航整块收起 —— 与安卓端「全屏时外壳一行不留」同一条取向：
+     * 留着它，画面上下那两条黑边永远补不匀，用户会以为「全屏没生效」。
+     */
+    fullscreen: Boolean = false,
+    onToggleFullscreen: () -> Unit = {},
     cinemaAuto: CinemaAuto? = null,
     identityOverride: String? = null,
     /** `--signal-endpoint` 的显式覆盖（null = 用 settings / 内置默认）。 */
@@ -445,14 +461,15 @@ fun AppRoot(
     Shortcuts.onOpenFile = chooseFile
 
     Row(Modifier.fillMaxSize().background(colors.background)) {
-        // ── 左侧导航 ─────────────────────────────────────────────────────────
-        Column(
-            Modifier
-                .width(196.dp)
-                .fillMaxHeight()
-                .background(colors.surface2)
-                .padding(horizontal = 12.dp, vertical = 18.dp),
-        ) {
+        // ── 左侧导航（全屏时收起）─────────────────────────────────────────────
+        if (!fullscreen) {
+            Column(
+                Modifier
+                    .width(196.dp)
+                    .fillMaxHeight()
+                    .background(colors.surface2)
+                    .padding(horizontal = 12.dp, vertical = 18.dp),
+            ) {
             Text("影厅", style = MaterialTheme.typography.headlineSmall, color = colors.ink)
             Text("Windows 端", style = MaterialTheme.typography.labelSmall, color = colors.ink3)
             Spacer(Modifier.height(22.dp))
@@ -482,6 +499,7 @@ fun AppRoot(
             Spacer(Modifier.weight(1f))
             Text(if (AppPaths.packaged) "打包版" else "开发版", style = MaterialTheme.typography.labelSmall, color = colors.ink3)
             Text(AppPaths.appRoot.absolutePath, style = MaterialTheme.typography.labelSmall, color = colors.ink3)
+            }
         }
 
         // ── 内容 ─────────────────────────────────────────────────────────────
@@ -500,6 +518,8 @@ fun AppRoot(
                     onGoLibrary = { screen = Screen.Library },
                     onOpenFromLibrary = { openFile(it) },
                     movies = movies,
+                    fullscreen = fullscreen,
+                    onToggleFullscreen = onToggleFullscreen,
                 )
 
                 Screen.Cinema -> CinemaScreen(
@@ -520,6 +540,8 @@ fun AppRoot(
                     onOpenFile = chooseFile,
                     movies = movies,
                     onSelectMovie = { selectForHall(it) },
+                    fullscreen = fullscreen,
+                    onToggleFullscreen = onToggleFullscreen,
                 )
 
                 Screen.Library -> LibraryScreen(
@@ -582,26 +604,37 @@ private fun HomeScreen(
     onGoLibrary: () -> Unit,
     onOpenFromLibrary: (DesktopMovie) -> Unit,
     movies: List<DesktopMovie>,
+    fullscreen: Boolean,
+    onToggleFullscreen: () -> Unit,
 ) {
     val colors = LocalCinemaColors.current
     Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("首页", style = MaterialTheme.typography.titleLarge, color = colors.ink)
-                Text(
-                    if (movie == null) "还没选片" else movie.title,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colors.ink3,
-                )
+        // 全屏时把标题行也收起来：全屏的字面意思就是「只剩画面」，留着一条
+        // 通栏标题会让画面上下的黑边永远补不匀（安卓端同样是「外壳一行不留」）。
+        if (!fullscreen) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("首页", style = MaterialTheme.typography.titleLarge, color = colors.ink)
+                    Text(
+                        if (movie == null) "还没选片" else movie.title,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.ink3,
+                    )
+                }
+                OutlinedButton(onClick = onGoLibrary) { Text("影片库") }
+                Spacer(Modifier.width(8.dp))
+                Button(onClick = onOpenFile) { Text("打开文件") }
             }
-            OutlinedButton(onClick = onGoLibrary) { Text("影片库") }
-            Spacer(Modifier.width(8.dp))
-            Button(onClick = onOpenFile) { Text("打开文件") }
         }
-        Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp)) {
+        Box(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = if (fullscreen) 0.dp else 16.dp),
+        ) {
             if (movie == null) {
                 EmptyHome(movies = movies, onOpen = onOpenFromLibrary, onGoLibrary = onGoLibrary)
             } else {
@@ -612,6 +645,8 @@ private fun HomeScreen(
                     autoplay = autoplay,
                     onVolumeChange = onVolumeChange,
                     onOpenFile = onOpenFile,
+                    fullscreen = fullscreen,
+                    onToggleFullscreen = onToggleFullscreen,
                 )
             }
         }
@@ -665,65 +700,145 @@ private fun LibraryScreen(
     onSelect: (DesktopMovie) -> Unit,
 ) {
     val colors = LocalCinemaColors.current
-    var manualPath by remember { mutableStateOf("") }
+    // `⋮` 里「粘贴路径…」用的临时输入。与「选择根目录…」走同一个 `onAddRoot`，
+    // 只是给系统选择器不好用的场景留一条路（网络盘、超长路径、脚本里抄来的路径）。
+    var pastePath by remember { mutableStateOf("") }
+    var pasteOpen by remember { mutableStateOf(false) }
+    var rootMenu by remember { mutableStateOf(false) }
 
-    Column(Modifier.fillMaxSize().padding(20.dp)) {
-        Text("影片库", style = MaterialTheme.typography.titleLarge, color = colors.ink)
-        Spacer(Modifier.height(4.dp))
-        Text("多根目录递归扫描 · 快扫先列片，时长后台补", color = colors.ink3, style = MaterialTheme.typography.labelSmall)
-        Spacer(Modifier.height(14.dp))
-
-        Panel(title = "根目录", subtitle = "${roots.size} 个") {
-            roots.forEach { root ->
-                Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(root, Modifier.weight(1f), color = colors.ink2, style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = { onRemoveRoot(root) }) { Text("移除", color = colors.ink3) }
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextField(
-                    value = manualPath,
-                    onValueChange = { manualPath = it },
-                    singleLine = true,
-                    placeholder = { Text("或粘贴一个目录路径，例如 D:\\Movies") },
-                    modifier = Modifier.weight(1f),
+    Column(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 18.dp)) {
+        // ── 标题行：与安卓端「标题 + 右上角操作」同一形状 ─────────────────────
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("影片库", style = MaterialTheme.typography.titleLarge, color = colors.ink)
+                Text(
+                    "多根目录递归扫描 · 快扫先列片，时长后台补",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.ink3,
                 )
-                Spacer(Modifier.width(8.dp))
-                OutlinedButton(onClick = {
-                    if (manualPath.isNotBlank()) {
-                        onAddRoot(File(manualPath.trim()))
-                        manualPath = ""
-                    }
-                }) { Text("添加") }
-                Spacer(Modifier.width(8.dp))
-                OutlinedButton(onClick = {
-                    chooseDirectory()?.let(onAddRoot)
-                }) { Text("选择目录…") }
+            }
+            OutlinedButton(onClick = { chooseDirectory()?.let(onAddRoot) }) { Text("选择根目录…") }
+            Spacer(Modifier.width(8.dp))
+            if (scanning) {
+                OutlinedButton(onClick = onCancel) { Text("取消扫描") }
+            } else {
+                Button(onClick = onScan, enabled = roots.isNotEmpty()) { Text("开始扫描") }
             }
         }
 
-        Spacer(Modifier.height(12.dp))
-        Panel(
-            title = "扫描",
-            subtitle = when (stats.phase) {
-                ScanPhase.IDLE -> "未开始"
-                ScanPhase.FAST -> "快扫中…"
-                ScanPhase.PROBING -> "解析时长 ${stats.probed}/${stats.found}"
-                ScanPhase.DONE -> "完成：${stats.found} 部"
-                ScanPhase.CANCELLED -> "已取消"
-            },
+        Spacer(Modifier.height(14.dp))
+
+        // ── 根目录卡片：**只有一行** ──────────────────────────────────────────
+        // 安卓端那张卡是一整块（分类列表 + 添加按钮）。桌面端根目录是扁平的 N 条路径，
+        // 照搬会变成一屏文字，所以压成一行：左边一行摘要（路径用 ` · ` 连起来，超出省略），
+        // 右边「管理」；逐条移除与粘贴路径都收进这一颗的下拉里，不再各占一行。
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(colors.surface2)
+                .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (scanning) {
-                LinearProgressIndicator(
-                    progress = { if (stats.phase == ScanPhase.FAST) 0f else stats.probedFraction },
-                    modifier = Modifier.fillMaxWidth(),
+            Text("根目录", style = MaterialTheme.typography.labelSmall, color = colors.ink3)
+            Spacer(Modifier.width(10.dp))
+            Text(
+                if (roots.isEmpty()) {
+                    "还没添加根目录 —— 点右侧「选择根目录…」挑一个文件夹"
+                } else {
+                    roots.joinToString("   ·   ")
+                },
+                Modifier.weight(1f),
+                color = if (roots.isEmpty()) colors.ink3 else colors.ink2,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (roots.size > 1) {
+                Text(
+                    "${roots.size} 个",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.ink3,
+                    modifier = Modifier.padding(start = 8.dp),
                 )
-                Spacer(Modifier.height(8.dp))
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onScan, enabled = !scanning && roots.isNotEmpty()) { Text("开始扫描") }
-                OutlinedButton(onClick = onCancel, enabled = scanning) { Text("取消") }
+            Box {
+                TextButton(onClick = { rootMenu = true }) { Text("管理", color = colors.ink2) }
+                DropdownMenu(expanded = rootMenu, onDismissRequest = { rootMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("粘贴路径…") },
+                        onClick = {
+                            rootMenu = false
+                            pastePath = ""
+                            pasteOpen = true
+                        },
+                    )
+                    if (roots.isEmpty()) {
+                        DropdownMenuItem(
+                            text = { Text("（还没有根目录）", color = colors.ink3) },
+                            onClick = { rootMenu = false },
+                        )
+                    }
+                    roots.forEach { root ->
+                        DropdownMenuItem(
+                            text = { Text("移除 · $root", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            onClick = {
+                                rootMenu = false
+                                onRemoveRoot(root)
+                            },
+                        )
+                    }
+                }
+            }
+        }
+
+        if (pasteOpen) {
+            AlertDialog(
+                onDismissRequest = { pasteOpen = false },
+                title = { Text("添加根目录") },
+                text = {
+                    TextField(
+                        value = pastePath,
+                        onValueChange = { pastePath = it },
+                        singleLine = true,
+                        placeholder = { Text("例如 D:\\Movies") },
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val path = pastePath.trim()
+                            pasteOpen = false
+                            if (path.isNotEmpty()) onAddRoot(File(path))
+                        },
+                    ) { Text("添加") }
+                },
+                dismissButton = { TextButton(onClick = { pasteOpen = false }) { Text("取消") } },
+            )
+        }
+
+        // ── 扫描条：也只有一行；没扫过就不出现（空库不该先看到一条「未开始」的灰条）
+        if (scanning || stats.phase != ScanPhase.IDLE) {
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                if (scanning) {
+                    LinearProgressIndicator(
+                        progress = { if (stats.phase == ScanPhase.FAST) 0f else stats.probedFraction },
+                        modifier = Modifier.width(180.dp),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                }
+                Text(
+                    when (stats.phase) {
+                        ScanPhase.IDLE -> "未开始"
+                        ScanPhase.FAST -> "快扫中…"
+                        ScanPhase.PROBING -> "解析时长 ${stats.probed}/${stats.found}"
+                        ScanPhase.DONE -> "扫描完成：${stats.found} 部"
+                        ScanPhase.CANCELLED -> "已取消（已列出 ${stats.found} 部）"
+                    },
+                    color = colors.ink2,
+                    style = MaterialTheme.typography.labelMedium,
+                )
                 Spacer(Modifier.weight(1f))
                 Text(
                     "快扫 ${stats.fastElapsedMs}ms · 解析 ${stats.probeElapsedMs}ms · " +
@@ -735,41 +850,87 @@ private fun LibraryScreen(
         }
 
         Spacer(Modifier.height(12.dp))
-        Panel(title = "影片", subtitle = "${movies.size} 部", modifier = Modifier.weight(1f)) {
-            if (movies.isEmpty()) {
+        // ── 影片：安卓端的正方形卡片网格 ───────────────────────────────────────
+        Text("影片 · ${movies.size} 部", style = MaterialTheme.typography.titleSmall, color = colors.ink2)
+        Spacer(Modifier.height(8.dp))
+        if (movies.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("还没有影片。添加根目录后点「开始扫描」。", color = colors.ink3)
-            } else {
-                LazyColumn(Modifier.fillMaxSize()) {
-                    items(movies, key = { it.path }) { movie ->
-                        Row(
-                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                when (movie.bucket) {
-                                    ScanBucket.MOVIE -> "电影"
-                                    ScanBucket.SERIES -> "剧集"
-                                    ScanBucket.SKIP -> "短片"
-                                    null -> "…"
-                                },
-                                color = colors.ink3,
-                                style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.width(48.dp),
-                            )
-                            Column(Modifier.weight(1f)) {
-                                Text(movie.title, color = colors.ink)
-                                Text(
-                                    "${formatDuration(movie.durationMs)} · ${formatBytes(movie.sizeBytes)} · ${movie.path}",
-                                    color = colors.ink3,
-                                    style = MaterialTheme.typography.labelSmall,
-                                )
-                            }
-                            TextButton(onClick = { onSelect(movie) }) { Text("选择") }
-                        }
-                        HorizontalDivider(color = colors.line)
-                    }
+            }
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 156.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                gridItems(movies, key = { it.path }) { movie ->
+                    MovieCard(movie = movie, onSelect = { onSelect(movie) })
                 }
             }
+        }
+    }
+}
+
+/**
+ * 一格影片（安卓端 `MovieSquareCard` 的桌面版）。
+ *
+ * 正方形卡片、底部两行字（片名 / 时长 · 大小），整块可点 —— 与安卓端「点一格选中这部片」
+ * 是同一个动作，所以动作名也用同一句。桌面端的影片库没有海报、也不记观看进度，中间就放
+ * 一枚压得很淡的播放符：留纯色块的话，整个网格看起来像一排加载失败的占位。
+ */
+@Composable
+private fun MovieCard(movie: DesktopMovie, onSelect: () -> Unit) {
+    val colors = LocalCinemaColors.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(12.dp))
+            .background(colors.surface2)
+            .clickable(onClickLabel = "选中这部片", onClick = onSelect),
+    ) {
+        Box(Modifier.fillMaxWidth().weight(1f)) {
+            Text(
+                "▶",
+                color = colors.ink3.copy(alpha = 0.22f),
+                style = MaterialTheme.typography.headlineMedium,
+                modifier = Modifier.align(Alignment.Center),
+            )
+            Text(
+                when (movie.bucket) {
+                    ScanBucket.MOVIE -> "电影"
+                    ScanBucket.SERIES -> "剧集"
+                    ScanBucket.SKIP -> "短片"
+                    // 快扫阶段时长还没解析出来，`bucket` 就是 null —— 说「待解析」，
+                    // 不说「短片」：后者会让用户以为片子被判成了短片。
+                    null -> "待解析"
+                },
+                color = if (movie.bucket == null) colors.ink3 else colors.accent,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+            )
+        }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 8.dp)) {
+            Text(
+                movie.title,
+                color = colors.ink,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                if (movie.durationMs > 0) {
+                    "${formatDuration(movie.durationMs)} · ${formatBytes(movie.sizeBytes)}"
+                } else {
+                    "时长待解析 · ${formatBytes(movie.sizeBytes)}"
+                },
+                color = colors.ink3,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

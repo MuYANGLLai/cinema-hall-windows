@@ -93,6 +93,19 @@ class DesktopMovieCatalog(
     /** `path -> 缓存`；读写只在扫描线程/初始化线程，所以用普通 map + 同步块。 */
     private val durationCache = HashMap<String, CachedDuration>()
 
+    /**
+     * 影片顺序：先按所在目录，再按文件名（大小写不敏感）—— 载入与扫描必须用同一个。
+     *
+     * ⚠️ 声明位置是**有讲究**的：必须排在 `init` 之前。Kotlin 的实例初始化按声明顺序执行，
+     * 放到 `init` 之后就等于「`load()` 里用到它时它还是 null」—— 而 `load()` 被
+     * `runCatching` 包着，那个 NPE 会被静默吞掉，症状是「根目录还在、影片列表整个空掉」，
+     * 看起来像落盘没写成功（2026-11-06 亲手撞过）。
+     */
+    private val movieOrder = compareBy<DesktopMovie>(
+        { it.path.substringBeforeLast(File.separatorChar) },
+        { it.fileName.lowercase() },
+    )
+
     init {
         runCatching { load() }
     }
@@ -220,7 +233,7 @@ class DesktopMovieCatalog(
 
         _movies.value = _movies.value
             .map { current -> updated[current.path]?.let { current.copy(durationMs = it) } ?: current }
-            .sortedWith(compareBy({ it.path.substringBeforeLast(File.separatorChar) }, { it.fileName.lowercase() }))
+            .sortedWith(movieOrder)
 
         _stats.value = _stats.value.copy(
             phase = if (cancelled.get()) ScanPhase.CANCELLED else ScanPhase.DONE,
@@ -314,11 +327,32 @@ class DesktopMovieCatalog(
         val durationMs: Long,
     )
 
+    /**
+     * 落盘的一条影片。
+     *
+     * ── 为什么影片列表也要存（2026-11-06 补）───────────────────────────────────
+     * 早先只存「根目录 + 时长缓存」，影片列表靠每次启动重扫才出现。症状是：用户上次
+     * 已经扫过 30 部，今天打开影片库却是「0 部 / 还没有影片」—— 看起来像库丢了。
+     * 安卓端那一侧是持久化的（`MovieLibraryStore`），两端行为不一致本身就是缺陷。
+     *
+     * 存列表**不改变扫描的地位**：重扫仍然覆盖它（新增、删除、改名的文件都以扫描为准），
+     * 时长缓存继续按 `(size, mtime)` 失效重算。
+     */
+    @Serializable
+    private data class StoredMovie(
+        val path: String,
+        val fileName: String,
+        val sizeBytes: Long,
+        val modifiedAtMs: Long,
+        val durationMs: Long = 0,
+    )
+
     @Serializable
     private data class Stored(
         val version: Int = 1,
         val roots: List<String> = emptyList(),
         val durations: Map<String, CachedDuration> = emptyMap(),
+        val movies: List<StoredMovie> = emptyList(),
     )
 
     private fun load() {
@@ -329,6 +363,9 @@ class DesktopMovieCatalog(
             durationCache.clear()
             durationCache.putAll(stored.durations)
         }
+        _movies.value = stored.movies
+            .map { DesktopMovie(it.path, it.fileName, it.sizeBytes, it.modifiedAtMs, it.durationMs) }
+            .sortedWith(movieOrder)
     }
 
     private fun persist() {
@@ -337,6 +374,9 @@ class DesktopMovieCatalog(
             val stored = Stored(
                 roots = _roots.value,
                 durations = synchronized(durationCache) { HashMap(durationCache) },
+                movies = _movies.value.map {
+                    StoredMovie(it.path, it.fileName, it.sizeBytes, it.modifiedAtMs, it.durationMs)
+                },
             )
             val temp = File(storeFile.parentFile, storeFile.name + ".tmp")
             temp.writeText(json.encodeToString(stored))

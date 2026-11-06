@@ -1187,6 +1187,28 @@ class CinemaSyncEngine(
             CinemaPlayback.ACTION_PLAY -> {
                 val payload = CinemaPlaybackCodec.decodePosition(env.payload) ?: return malformed(action)
                 val now = clock()
+                if (host) {
+                    // ── 房主是**进度**的权威（2026-11-06 用户口径）────────────────────
+                    // 旧做法把 `payload.positionMs` 当新锚点：于是任何一台成员按下播放，
+                    // 全场都会被拉到**它那台**的进度上 —— 用户看到的是「各自播各自的」，
+                    // 而且每次有人按播放就会跳一次。
+                    // 现在的语义：成员按播放只表达「开始吧」，位置取房主这台；房主随即
+                    // 再广播一次，按下播放的那台与其它成员一起跟到房主的时间轴上。
+                    if (!player.isPlayRequested) player.play()
+                    val position = player.currentPositionMs
+                    anchorLocal(now, position, isPlaying = true)
+                    broadcastPlayState(
+                        playing = true,
+                        atMs = now,
+                        positionMs = position,
+                        reason = "成员按了播放，按房主位置对齐",
+                    )
+                    note(
+                        "收到 ${CinemaPlayback.TYPE_PLAY}（对端报 ${payload.positionMs} ms）：" +
+                            "以本机 $position ms 为准重新广播，全场跟房主",
+                    )
+                    return
+                }
                 anchorFromHost(now, payload.positionMs, isPlaying = true, senderClockMs = payload.senderClockMs)
                 if (!player.isPlayRequested) player.play()
                 noteCurrentPlayState()

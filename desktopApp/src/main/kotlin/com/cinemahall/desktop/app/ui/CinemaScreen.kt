@@ -107,6 +107,9 @@ fun CinemaScreen(
     movies: List<DesktopMovie> = emptyList(),
     /** 在影厅页选片：只换片源，**留在影厅页**、不自动起播。 */
     onSelectMovie: (DesktopMovie) -> Unit = {},
+    /** 全屏（窗口级，由 `Main` 承载）。全屏时右侧成员栏也收起来。 */
+    fullscreen: Boolean = false,
+    onToggleFullscreen: () -> Unit = {},
 ) {
     val colors = LocalCinemaColors.current
 
@@ -159,6 +162,8 @@ fun CinemaScreen(
                 onOpenFile = onOpenFile,
                 movies = movies,
                 onSelectMovie = onSelectMovie,
+                fullscreen = fullscreen,
+                onToggleFullscreen = onToggleFullscreen,
             )
         }
     }
@@ -440,6 +445,8 @@ private fun HallPanel(
     onOpenFile: () -> Unit,
     movies: List<DesktopMovie> = emptyList(),
     onSelectMovie: (DesktopMovie) -> Unit = {},
+    fullscreen: Boolean = false,
+    onToggleFullscreen: () -> Unit = {},
 ) {
     val colors = LocalCinemaColors.current
     val callAudio by module.handler.callAudio.collectAsState()
@@ -539,19 +546,22 @@ private fun HallPanel(
                     onOpenFile = onOpenFile,
                 )
             } else {
-                SourceBanner(
-                    isHost = isHost,
-                    check = mediaCheck,
-                    onOpenFile = onOpenFile,
-                    onPickFromLibrary = { picking = true },
-                )
-                if (!isHost) {
-                    Text(
-                        "播放由房主控制：本机的播放键、±10s、进度条与倍速已锁；换片、音量、字幕不受限。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.ink3,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                // 全屏时把「片源条 + 成员提示」也收起来：全屏只留画面与控制条。
+                if (!fullscreen) {
+                    SourceBanner(
+                        isHost = isHost,
+                        check = mediaCheck,
+                        onOpenFile = onOpenFile,
+                        onPickFromLibrary = { picking = true },
                     )
+                    if (!isHost) {
+                        Text(
+                            "播放由房主控制：本机的播放键、±10s、进度条与倍速已锁；换片、音量、字幕不受限。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.ink3,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                        )
+                    }
                 }
                 PlayerPane(
                     controller = controller,
@@ -567,15 +577,30 @@ private fun HallPanel(
                     // 音量/字幕不在此列。2026-11-06 用户报「房员能自己拖进度条」就是这里
                     // 原先只判了「片源不一致」，没判控制权。
                     interactive = syncStatus.canControl && !listening,
+                    fullscreen = fullscreen,
+                    onToggleFullscreen = onToggleFullscreen,
+                    // 手动同步：房主按 = 立刻广播自己的位置；成员按 = 请房主回一条心跳。
+                    // 它不参与控制权划分（两端都安全），与安卓端同一口径。
+                    onManualSync = { module.handler.requestManualSync() },
+                    // 成员端的说明改到画面左上角（与安卓端那条灰条同位置），
+                    // 不再占掉画面高度 —— 全屏时也能看到「为什么按不动」。
+                    controlHint = if (!isHost && !listening) {
+                        "播放由房主控制（换片 / 音量 / 字幕不受限）"
+                    } else {
+                        null
+                    },
                 )
             }
         }
 
-        Column(
-            Modifier
-                .width(332.dp)
-                .fillMaxHeight()
-                .background(colors.surface2)
+        // 全屏时右侧成员栏整块收起：332dp 常驻栏会把画面挤成窄条，
+        // 「全屏」就名不副实了。成员列表在非全屏时照旧。
+        if (!fullscreen) {
+            Column(
+                Modifier
+                    .width(332.dp)
+                    .fillMaxHeight()
+                    .background(colors.surface2)
                 .padding(horizontal = 16.dp, vertical = 14.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -658,6 +683,7 @@ private fun HallPanel(
                 colors.ink2,
             )
             TextButton(onClick = { module.leaveRoom() }) { Text("离开房间") }
+        }
         }
     }
 }

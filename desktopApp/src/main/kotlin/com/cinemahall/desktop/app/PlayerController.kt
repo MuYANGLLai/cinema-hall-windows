@@ -69,6 +69,22 @@ class PlayerController {
     val canPlay: Boolean get() = target != null
 
     /**
+     * 唯一的视频画面（AWT Canvas）。
+     *
+     * ── 为什么放在这里而不是 `PlayerPane` 里 `remember`（2026-11-06 用户报「切页黑屏」）──
+     * 页面态的组合会整个拆掉重建：在影厅页点「影片库」再点回来，`PlayerPane` 会重新
+     * `remember` 出一个**新 Canvas**，旧的被 `detachSurface()` 摘掉。摘掉的那一刻
+     * libVLC 的视频输出就没了 —— 正在播的片子画面黑掉，声音还在走。成员端又没有
+     * 控制权（播放键是灰的），于是「一直无法播放」，只能退房重进。
+     *
+     * 画面必须与**播放器**同寿命（进程级），而不是与页面同寿命。放在这里之后，
+     * 切页只是把同一块 Canvas 重新挂回组合，`attachSurface()` 幂等，画面不重建。
+     */
+    val surface: com.cinemahall.core.media.PlaybackSurface? by lazy {
+        target?.createSurface()
+    }
+
+    /**
      * 时长探测并发数（播放器池大小与目录扫描的信号量都用它）。
      *
      * 为什么不是常数 4：探测一次要真起一个 demux（打开容器、读头部、报长度），
