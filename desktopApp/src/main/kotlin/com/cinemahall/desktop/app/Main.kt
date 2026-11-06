@@ -15,6 +15,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.cinemahall.desktop.app.account.DesktopAccount
+import com.cinemahall.desktop.app.net.DesktopModule
 import com.cinemahall.desktop.app.ui.AppRoot
 import com.cinemahall.desktop.app.ui.CinemaAuto
 import com.cinemahall.desktop.app.ui.CinemaHolder
@@ -98,6 +100,34 @@ fun main(args: Array<String>) {
         Log.warn("已有实例在运行（profile=${options.profile}）；如需并行测试请用 --profile=b")
         println("cinema-hall 已在运行。若要在同一台机器上跑第二个实例，请加 --profile=b")
         return
+    }
+
+    // ── 设备激活（W7-C7）──────────────────────────────────────────────────────
+    // 凭据按 profile 分文件：`data/` 是所有 profile 共用的（只有单实例锁按 profile 分），
+    // 而同机双实例验证要用两个不同账号 —— 共用一个 json 会互相覆盖。
+    val account = DesktopAccount(AppPaths.credentialsFile(options.profile))
+
+    // 门禁用：`--activate=<入场码>` 在窗口出现之前把激活做完，走的就是产品同一条
+    // `DesktopAccount.activate()`。码本身不进日志（`describe()` 只打「有没有传」）。
+    options.activateCode?.let { code ->
+        val configured = account.configure(options.signalEndpoint)
+        val failure = if (!configured) {
+            "信令地址不可用：${options.signalEndpoint}"
+        } else {
+            kotlinx.coroutines.runBlocking {
+                account.activate(
+                    code = code,
+                    deviceName = options.deviceName ?: DesktopModule.defaultNickname(),
+                    nickname = options.nickname,
+                )
+            }
+        }
+        if (failure != null) {
+            Log.error("[account] --activate 失败：$failure")
+            runCatching { instance.close() }
+            kotlin.system.exitProcess(2)
+        }
+        Log.info("[account] --activate 完成 profile=${options.profile} endpoint=${options.signalEndpoint}")
     }
 
     val controller = PlayerController()
@@ -241,6 +271,7 @@ fun main(args: Array<String>) {
                     },
                     initialMovie = initialMovie,
                     cinema = cinema,
+                    account = account,
                     initialScreen = screenOf(options.initialScreen),
                     cinemaAuto = if (options.cinemaCreate || options.cinemaJoin != null) {
                         CinemaAuto(options.cinemaCreate, options.cinemaJoin ?: options.roomId)
@@ -248,6 +279,7 @@ fun main(args: Array<String>) {
                         null
                     },
                     identityOverride = options.identity,
+                    endpointOverride = options.signalEndpointOverride,
                 )
             }
 
@@ -338,8 +370,31 @@ private data class StartupOptions(
      * 两边读到同一个 id 就会被服务端当成同一个人（后进的那个会把先进的那个顶掉）。
      */
     val identity: String?,
-    /** 信令服务地址（C5）。默认指向本机开发服务。 */
+    /**
+     * 门禁用：`--activate=<入场码>` —— 在窗口出现之前把激活做完。
+     *
+     * 为什么需要它：生产是 `AUTH_MODE=required`，双实例验证要两个**不同账号**；
+     * 而激活页是 GUI，自动化脚本没法往里打字。这条参数走的就是产品同一条
+     * `DesktopAccount.activate()`，不做任何测试专用的旁路。
+     *
+     * ⚠️ 码本身**不进日志**（它是一次性凭证），`describe()` 只打「有没有传」。
+     */
+    val activateCode: String?,
+    /** 激活时的设备名（默认计算机名）。 */
+    val deviceName: String?,
+    /** 激活时的昵称（可选；留空由服务端生成）。 */
+    val nickname: String?,
+    /** 信令服务地址（C5）。默认指向生产；自检与 `--activate` 都用这个解析后的值。 */
     val signalEndpoint: String,
+    /**
+     * 用户**显式**传了 `--signal-endpoint` 吗？只有显式传才对 UI 生效。
+     *
+     * 为什么要和 [signalEndpoint] 分开：那个是要给自检用的「解析后」值（永远非空），
+     * 而界面侧的优先级是 `--signal-endpoint` > `settings.json` > 内置默认。
+     * 早先界面只读 settings，于是「用 `--signal-endpoint` 指向本机服务端跑一次」
+     * 会变成：激活打在本机，界面却去连生产 —— 两端对不上，且门禁还以为自己连的是本机。
+     */
+    val signalEndpointOverride: String?,
     /** C5 自检用的固定房号。 */
     val roomId: String,
     val rtcPort: Int,
@@ -352,6 +407,8 @@ private data class StartupOptions(
             "rtcTone=$rtcTone roomTest=${roomTest ?: "-"} sessionTest=${sessionTest ?: "-"} " +
             "roomId=$roomId screen=${initialScreen ?: "home"} cinemaCreate=$cinemaCreate " +
             "cinemaJoin=${cinemaJoin ?: "-"} identity=${identity ?: "-"} " +
+            "activate=${activateCode != null} deviceName=${deviceName ?: "-"} " +
+            "nickname=${nickname ?: "-"} " +
             "signal=$signalEndpoint rtcPort=$rtcPort"
 
     companion object {
@@ -377,8 +434,12 @@ private data class StartupOptions(
                 cinemaCreate = args.contains("--cinema-create"),
                 cinemaJoin = value("--cinema-join")?.takeIf { it.isNotBlank() },
                 identity = value("--identity")?.takeIf { it.isNotBlank() },
+                activateCode = value("--activate")?.takeIf { it.isNotBlank() },
+                deviceName = value("--device-name")?.takeIf { it.isNotBlank() },
+                nickname = value("--nickname")?.takeIf { it.isNotBlank() },
                 signalEndpoint = value("--signal-endpoint")?.takeIf { it.isNotBlank() }
-                    ?: "ws://127.0.0.1:8080",
+                    ?: DEFAULT_SIGNAL_ENDPOINT,
+                signalEndpointOverride = value("--signal-endpoint")?.takeIf { it.isNotBlank() },
                 // 房号规则：6 位、且不含 `0/O/1/I/L`（服务端校验）。自检默认值必须合规，
                 // 否则自检连「进房」都到不了，看起来像 RTC 的问题。
                 roomId = value("--room-id")?.takeIf { it.isNotBlank() } ?: "ABCDEF",

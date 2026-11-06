@@ -107,6 +107,14 @@ class CinemaHandler(
         val matched: Boolean = false,
         val watching: Boolean = false,
         val reason: String? = null,
+
+        /**
+         * 这个人**最后一次**报上来的摘要。房主把它留着只为了一件事：
+         * 自己换片 / 清空选择之后，不必等对方重发 hello 也能重算裁决
+         * （见 [recomputeMemberVerdicts]）。不参与 `equals` 的界面语义 ——
+         * 界面上看得到的是 [matched] / [watching] / [reason]。
+         */
+        val signature: MediaSignature? = null,
     )
 
     private val _members = MutableStateFlow<Map<UserId, MemberMedia>>(emptyMap())
@@ -501,6 +509,10 @@ class CinemaHandler(
         _mediaCheck.update { it.withLocal(signature) }
         // 引擎也要一份：房主在链路刚通时要靠它下发 `cinema.state_snapshot`（§6.4）。
         engine?.setMediaSignature(signature)
+        // 房主换片：**已经报过 hello 的人要重算**。不重算的话，裁决停在「我换片
+        // 那一刻」之前算出来的那一份 —— 真实路径是「成员先选、房主后选」，房主
+        // 一选完，成员那边仍显示「旁听（本机还没选片）」，而屏幕上明明两端一致。
+        recomputeMemberVerdicts()
         return sendHello()
     }
 
@@ -508,6 +520,58 @@ class CinemaHandler(
     fun clearLocalSignature() {
         _mediaCheck.update { it.withoutLocal() }
         engine?.setMediaSignature(null)
+        // 清空 = 我这边没片了，所有人对「一致」的结论都不再成立。
+        recomputeMemberVerdicts()
+    }
+
+    /**
+     * 本机摘要变过之后，按**每个人最后一次 hello 的摘要**重算一遍逐成员裁决，
+     * 并把变了的那些重新定向推给他们自己。
+     *
+     * 只在房主侧有效（`_members` 是房主视角，见 [members]）。成员表为空时它
+     * 一个字段都不动 —— 房主刚进房、还没人报 hello 时它会以「无变化」直接返回。
+     */
+    private fun recomputeMemberVerdicts() {
+        if (!isHostLocally) return
+        val current = _members.value
+        if (current.isEmpty()) return
+
+        val updated = current.mapValues { (_, media) ->
+            val (matched, reason) = judgeRemote(media.signature)
+            media.copy(matched = matched, watching = matched, reason = reason)
+        }
+        val changed = updated.filter { (peer, media) -> current[peer] != media }
+        if (changed.isEmpty()) return
+
+        _members.value = updated
+        changed.forEach { (peer, media) ->
+            publishMediaStatus(peer)
+            // 非挂起上下文（选片回调里调的），和 `applyControlPolicy` 同一手法：
+            // 起一次就返回，不等引擎那一帧。
+            actionScope.launch { onEngineThread { engine?.setPeerWatching(peer, media.matched) } }
+        }
+    }
+
+    /**
+     * 「本机摘要 vs 某个远端摘要」→ 匹配与否 + 给人看的原因。
+     *
+     * 两处调用（收到 hello、房主自己换片）**必须**用同一份判定，否则同一个人
+     * 会在两种进入顺序下得到两种结论，而用户只能看到后到的那一个。
+     */
+    private fun judgeRemote(remote: MediaSignature?): Pair<Boolean, String?> {
+        val local = _mediaCheck.value.local
+        val verdict = if (local == null || remote == null) {
+            null
+        } else {
+            MediaSignatureComparator.compare(local, remote)
+        }
+        val matched = verdict == MediaCheck.Match
+        val reason = when (verdict) {
+            null -> "本机还没选片"
+            MediaCheck.Match -> null
+            else -> "片源摘要不一致（$verdict）"
+        }
+        return matched to reason
     }
 
     /**
@@ -701,24 +765,27 @@ class CinemaHandler(
     private suspend fun onPeerHello(peer: UserId, hello: CinemaHello) {
         _mediaCheck.update { it.withRemote(hello) }
 
-        val local = _mediaCheck.value.local
-        val verdict = local?.let { own -> MediaSignatureComparator.compare(own, hello.mediaSignature) }
-        val matched = verdict == MediaCheck.Match
-        val reason = when (verdict) {
-            null -> "本机还没选片"
-            MediaCheck.Match -> null
-            else -> "片源摘要不一致（$verdict）"
-        }
+        val (matched, reason) = judgeRemote(hello.mediaSignature)
 
         // 房主侧：更新逐成员结论，并让引擎知道「这个人算不算在看」——
         // 控制权判据（§7）里的 `isWatching` 就是它。
-        _members.update {
-            it + (peer to MemberMedia(
-                nickname = hello.nickname,
-                matched = matched,
-                watching = matched,
-                reason = reason,
-            ))
+        //
+        // ⚠️ **这张表只属于房主**（[members] 的 KDoc 早就这么写：「从端为空」）。
+        // 从端也会收到 hello —— `onPeerChannelOpened` 两侧都发 —— 不设守卫的话
+        // 房主会被写成一条「成员裁决」，而那条裁决是用**从端当时的摘要**比出来的：
+        // 从端还没选片时比出 `matched=false`，界面就把房主显示成「旁听（本机还没
+        // 选片）」。2026-11-06 在三台模拟器上就是这么撞见的：房主明明在播，
+        // 从端这一行却说他旁听，而且从端再选片也不会刷新它（它只跟着 hello 走）。
+        if (isHostLocally) {
+            _members.update {
+                it + (peer to MemberMedia(
+                    nickname = hello.nickname,
+                    matched = matched,
+                    watching = matched,
+                    reason = reason,
+                    signature = hello.mediaSignature,
+                ))
+            }
         }
         onEngineThread { engine?.setPeerWatching(peer, matched) }
 

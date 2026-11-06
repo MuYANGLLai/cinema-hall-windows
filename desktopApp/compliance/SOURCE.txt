@@ -7,7 +7,7 @@ cinema-hall（Windows 分发包）源码获取说明
 一、本包对应的源码
 ------------------------------------------------
   仓库地址：https://github.com/MuYANGLLai/cinema-hall-windows
-  发布 tag：windows-0.1.0
+  发布 tag：windows-0.1.1
   （tag 指向的那个提交，就是本包对应的源码。这里刻意不写提交号：
    本文件本身也在源码树里，写死提交号会造成「改了本文件，提交号就失效」的自引用。）
 
@@ -15,10 +15,10 @@ cinema-hall（Windows 分发包）源码获取说明
 
     git clone https://github.com/MuYANGLLai/cinema-hall-windows.git
     cd cinema-hall-windows
-    git checkout windows-0.1.0
+    git checkout windows-0.1.1
 
     # 或者直接下载该 tag 的归档
-    https://github.com/MuYANGLLai/cinema-hall-windows/archive/refs/tags/windows-0.1.0.zip
+    https://github.com/MuYANGLLai/cinema-hall-windows/archive/refs/tags/windows-0.1.1.zip
 
   这个仓库里有什么：
     desktopApp/、desktop/{rtc,media,library}、
@@ -29,7 +29,10 @@ cinema-hall（Windows 分发包）源码获取说明
     它们是另外两个可独立分发的作品，与本包的对应源码无关；构建本包不需要它们。
 
   构建前提：JDK 17 或更高，**不需要 Android SDK**。
-    ./gradlew :desktopApp:packageRelease
+  构建（产物在 desktopApp/build/compose/binaries/main/app/cinema-hall/）：
+    ./gradlew :desktopApp:createDistributable
+  要打成 zip（发布分发包就是它的产物）：
+    ./gradlew :desktopApp:releaseZip
 
   运行时前提：需要 VLC 3.0.21。本源码仓库不含其二进制（体积与源码义务都不适合放
   源码仓库）；官方分发包是把它放在程序目录的 vlc/ 下随包分发的。

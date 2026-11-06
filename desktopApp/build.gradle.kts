@@ -25,6 +25,10 @@ dependencies {
     implementation(project(":core:session"))
     implementation(project(":core:network"))
     implementation(project(":core:protocol"))
+    // W7-C7：设备激活。纯 JVM 的账号客户端（HTTP + 启动状态机 + 凭据接缝）。
+    // **不要**在这里另写一套 HTTP：`HttpAccountApi` / `AccountRepository` /
+    // `AccountEndpoint` 已经是与 Android 共用的那一份，桌面只补一个凭据落盘实现。
+    implementation(project(":core:account"))
 
     implementation(compose.desktop.currentOs)
     implementation(compose.material3)
@@ -39,6 +43,7 @@ dependencies {
     implementation(libs.slf4j.simple)
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 }
 
 compose.desktop {
@@ -48,7 +53,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.AppImage)
             packageName = "cinema-hall"
-            packageVersion = "0.1.0"
+            packageVersion = "0.1.1"
             // ⚠️ 这里**故意只放 ASCII**。
             // Compose 插件把参数写成 UTF-8 的 `@args.txt` 交给 jpackage，而 Windows 上的
             // jpackage 按**系统代码页**读那个文件。本机是 GBK，一旦 `--description` 里出现
@@ -129,7 +134,7 @@ tasks.register<Zip>("releaseZip") {
         exclude("**/data/**")
         exclude("**/*.log")
     }
-    archiveFileName.set("cinema-hall-windows-0.1.0.zip")
+    archiveFileName.set("cinema-hall-windows-0.1.1.zip")
     destinationDirectory.set(layout.buildDirectory.dir("dist"))
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true

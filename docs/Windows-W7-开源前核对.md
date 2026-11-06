@@ -256,7 +256,7 @@ from(appImageRoot) {
 |---|---|---|---|---|
 | `LICENSE` | 包根 | 我们自己的 GPLv3 全文（35149 B，gnu.org 官方文本，含 `END OF TERMS AND CONDITIONS`） | `desktopApp/compliance/LICENSE` | ✅ 已加 |
 | `NOTICE-third-party.txt` | 包根 | 43116 B：组件↔许可证对照 + **Apache-2.0 / BSD-3(WebRTC) / MIT(SLF4J) / LGPL-2.1** 四份正文 | `desktopApp/compliance/NOTICE-third-party.txt` | ✅ 已加 |
-| `SOURCE.txt` | 包根 | 仓库地址 + 本包提交 `54f2f4c…` + 如实写明「该提交尚未推送到公开 main」+ 各组件上游源码地址 + FFmpeg §6 说明 | `desktopApp/compliance/SOURCE.txt` | ✅ 已加 |
+| `SOURCE.txt` | 包根 | 独立公开仓库 `cinema-hall-windows` + 发布 tag `windows-0.1.0`（**只引 tag、不写提交号** —— 本文件自己也在源码树里，写死提交号必然自引用）+ 构建方法 + 「仓库里有什么/没有什么」+ 各组件上游源码地址 + FFmpeg §6 说明 | `desktopApp/compliance/SOURCE.txt` | ✅ 已加 |
 | `第三方组件清单.md` | 包根 | 直接取 `docs/第三方组件清单.md`（单一副本，避免漂移） | `docs/` | ✅ 已加 |
 | `vlc/COPYING.txt` | `vlc/`（原位） | VLC 的 GPLv2 全文 | VLC 官方包 | ✅ 在包里，**不许删** |
 
@@ -277,7 +277,7 @@ from(appImageRoot) {
 
 ---
 
-### B6. 发布包自检表（2026-11-06 实跑，出包 commit `54f2f4c`）
+### B6. 发布包自检表（2026-11-06 实跑；C7「设备激活」后重新出包，读数已更新）
 
 > 任务名说明：仓库里**没有** `packageRelease` 这个任务，实际出包链路是
 > `:desktopApp:createDistributable → :desktopApp:stageRelease → :desktopApp:releaseZip`。
@@ -288,17 +288,17 @@ from(appImageRoot) {
 | 项 | 值 |
 |---|---|
 | 路径 | `desktopApp/build/dist/cinema-hall-windows-0.1.0.zip` |
-| 体积 | **171,957,837 B（164.0 MB）** |
-| sha256 | `fa1364bbd695d60bdea4e004c4829403fc3dfbea26a5b538ac1f61ba80ddf2b1` |
-| zip 条目 | 1295 |
+| 体积 | **172,148,408 B（164.2 MB）** |
+| sha256 | `4a43a920cc7171db3d3691a7e5f5d36d463b2df3a3a74902791f7b1403d6478b` |
+| zip 条目 | 1296 |
 | 顶层目录 | 只有 `cinema-hall/` |
-| 出包 commit | `54f2f4cc760f2837d17c15e91efd651c611e73c8` |
+| 出包 commit | 本轮 C7 的提交（`lane/L3-desktop`；具体 hash 见 `git log -1`，不在此处硬编码避免自引用） |
 
 **逐项自检**
 
 | # | 检查项 | 本次实际输出 | 判据 |
 |---|---|---|---|
-| 1 | 四份合规文件在包根 | `第三方组件清单.md 8962 B`<br>`LICENSE 35149 B`<br>`NOTICE-third-party.txt 43116 B`<br>`SOURCE.txt 2524 B` | 四个都在 |
+| 1 | 四份合规文件在包根 | `第三方组件清单.md 8962 B`<br>`LICENSE 35149 B`<br>`NOTICE-third-party.txt 43116 B`<br>`SOURCE.txt 3490 B` | 四个都在 |
 | 2 | `axvlc.dll` / `npvlc.dll` 不在 | `0` | 0 |
 | 3 | `msi/` 不在 | `0` | 0 |
 | 4 | `data/` 不在 | `0` | 0 |
@@ -306,7 +306,7 @@ from(appImageRoot) {
 | 6 | 只有一个顶层目录 | `cinema-hall` | 单个 |
 | 7 | `vlc/COPYING.txt` 仍在 | `18431` 字节 | > 0 |
 | 8 | 解压后能启动 | `exit=0`；日志 `libVLC 已加载：…\cinema-hall\vlc` | 退出码 0 且有该行 |
-| 9 | 重跑一次仍一致 | 体积与 sha256 逐字节相同（`fa1364bb…`） | 同哈希 |
+| 9 | 重跑一次仍一致 | 体积与 sha256 逐字节相同（`4a43a920…`） | 同哈希 |
 
 对应命令（`$z` = 上面那个 zip 的路径；**整段粘贴即可**，第 1–7 项一次跑完）：
 
@@ -328,8 +328,12 @@ $zip.Dispose()
 然后看 `cinema-hall\data\logs\app.log` 里有没有 `libVLC 已加载`。
 第 9 项：删掉 zip 后重跑 `.\gradlew.bat :desktopApp:releaseZip`，再 `Get-FileHash` 比 sha256。
 
-> 第 8 项是在**最终这一版 zip**（`fa1364bb…`）上重跑确认的：解压 → `--exit-after=10` → `exit=0`，日志出现
-> `libVLC 已加载：…\cinema-hall\vlc`，且包内 `第三方组件清单.md` 为 8962 B（与仓库一致）。
+> 第 8 项是在**最终这一版 zip**（`4a43a920…`）上重跑确认的：解压 → `--exit-after=8` → `exit=0`。本轮实测日志：
+> `libVLC 已加载：…\cinema-hall\vlc`、`[account] 账号层已装配：base=https://101.133.234.226:8443`、
+> `[account] 启动判定：需要激活 reason=NO_CREDENTIAL` —— 且**没有任何 `[signal]` 行**（未激活时不去连生产）。
+> 包内 `第三方组件清单.md` 为 8962 B（与仓库一致）。
+>
+> 第 9 项也在这一版上重跑过：删掉 zip 再 `releaseZip`，体积 `172,148,408` 与 sha256 `4a43a920…` 逐字节相同。
 
 第 8 项的意义：`axvlc`/`npvlc` 剔掉之后播放内核仍能加载，这四份合规文件和 `msi/` 的删除都没有破坏运行。
 
@@ -427,20 +431,113 @@ Get-ChildItem .\desktopApp\build\dist\cinema-hall | Select-Object Name
 2. **确认仓库公开范围**：整仓（含 `server/**`、`app/**`、`core/**`、`feature/**` 全部 Android 代码）一起公开，还是只公开 Windows 端目录？GPLv3 要求"对应源码"完整可获取，但 Android 端是**另一个可独立分发的作品**，可以单独许可。这条影响"整仓开源"到底开多大。
 3. **Q3（FFmpeg 是否静态链进 `jwebrtc.dll`）** 谁承担 —— 若静态链接，LGPL-2.1 §6 要求提供可重链接的目标文件。`SOURCE.txt` 现按「提供源码 + 重建说明 + 承诺代为索取」写（见 `docs/第三方组件清单.md` §4）；若要**商业分发**，这条仍建议过一次法务。
 
-> **2026-11-06 更新（源码去向已定并落地）**：开源范围按你的决定收窄为「只公开 Windows 端 + 它依赖的 `core`」，
-> 因此**不用**原仓库（那里 `main` 上是 Android 代码），而是单独建一个公开仓库：
+> **2026-11-06 更新（源码去向已落地；C7 的子集已在本机切好，只差推送 —— 发包前唯一的硬门禁）**
 >
-> - 仓库：`https://github.com/MuYANGLLai/cinema-hall-windows`
-> - 分支 `windows-public` → 远端 `main`；tag `windows-0.1.0`；对应提交 `171d274`（**根提交**，不带 Android 历史）
-> - 内容：`desktopApp`、`desktop/{rtc,media,library}`、`core/{session,network,protocol,model,rtc,media,library}`，共 187 个文件
-> - 已验证**可独立构建**：干净 worktree + JDK 17 + 不装 Android SDK，`:desktopApp:compileKotlin` 成功，
->   `test` 631 例 0 失败 0 错误
-> - 为公开而改的三处：`settings.gradle.kts` 只 include 11 个模块；根 `build.gradle.kts` 去掉 Android 插件别名；
->   `gradle.properties` 删掉 `org.gradle.java.home` 的本机路径
-> - `SOURCE.txt` 已改成指向该仓库 + tag（不再写未推送的提交号）
+> 公开范围已按你的决定收窄为「只公开 Windows 端 + 它依赖的 `core`」，因此**不用**原仓库
+> （那里 `main` 上是 Android 代码），而是单独建了一个公开仓库：
 >
-> 仍待完成的一步只有「把这条分支推上去」：本机到 `github.com:443` 当时不通（直连与代理均失败），
-> 已挂 30 秒一轮的重试。**在推送成功之前不要把这个包发给别人** —— 那样源码义务只履行了一半。
+> - 仓库 `https://github.com/MuYANGLLai/cinema-hall-windows`；分支 `windows-public` → 远端 `main`；
+>   tag `windows-0.1.0`；根提交 `39e51c4`（**不带** Android / `server` 历史），187 个文件
+> - **已于 2026-11-06 13:28 推送成功**（`* [new branch] windows-public -> main`、`* [new tag] windows-0.1.0`）
+> - 已验证可独立构建：干净 worktree + JDK 17 + **不装 Android SDK**，`compileKotlin` 通过，`test` 631 例 0 失败
+> - `SOURCE.txt` 已改成「只引 tag、不写提交号」（改见 `317f424`，本轮已并入 L3 分支）
+>
+> **⚠️ 上面那版是 C6 的代码。** C7（设备激活）之后包重出了（§B6），若 tag 还停在 C6，
+> 拿包的人按 `SOURCE.txt` 取到的源码构建出来是「没有设备激活」的旧程序 —— 对着生产一样连不上。
+>
+> **所以已经做了 §C6 的第 1–3 步**：子集已重切（208 个文件，含 C7 与 `core/account`），tag `windows-0.1.0` 已指到它，
+> tag `windows-0.1.0` 已指到它，独立构建验证 706 例 0 失败。**只剩第 4 步 push 没做**（公开动作按约定由你执行）。
+> push 之前这个包不要发给别人。
+
+### C6. 发包前最后一步：把 C7 源码推到公开仓库（操作 1 分钟 + 验证 30 秒 + 推送）
+
+背景：`SOURCE.txt` 引的是 tag `windows-0.1.0`，所以「包 = 源码」成立的唯一条件是
+**tag 指向的树 = 出这个包的代码**。C7 改了代码，tag 原来停在 C6，于是必须重切一次。
+重切不是「重跑一条命令」那么简单：C7 让 `desktopApp` 依赖了 `core:account`，
+公开仓的模块清单要跟着扩（脚本已处理，见下）。
+
+**截至 2026-11-06 15:05 的本机状态（第 1–3 步已做完，只剩第 4 步推送）**
+
+| 项 | 值 |
+|---|---|
+| 分支 `windows-public` | 父提交 `39e51c4`（= 公开仓当前 `main`）；自身 hash 每次重切都会变，以 `git rev-parse --short windows-public` 为准 |
+| tag `windows-0.1.0` | 带注释 tag，指向 `windows-public` 同一个提交（`git rev-parse --short 'windows-0.1.0^{commit}'` 应与之相同） |
+| 文件数 | **208** = C6 的 187 + C7 新增 4 + `core/account` 17 |
+| 独立构建验证 | 干净 worktree + JDK 17 + `--offline`：`BUILD SUCCESSFUL` 23 s；**706 例 0 失败 0 错误**（C6 是 631，多出的 75 例来自 `core:account`） |
+| 待你做的 | 第 4 步 `git push`（公开动作，按约定我不推） |
+
+**第 1 步：切子集（一条命令；脚本已在库里：`docs/tools/sync-windows-public.ps1`）**
+
+```powershell
+pwsh -NoProfile -File 'D:\AI\minimax\cinema-hall-L3\docs\tools\sync-windows-public.ps1'
+```
+
+脚本做四件事（都不复制文件、不改工作树，全程走临时索引 `GIT_INDEX_FILE`）：
+
+1. `git read-tree 39e51c4` 把公开仓当前的树读进临时索引，再按允许清单 `git add -A` 覆盖成当前工作树的内容
+   —— 允许清单 = `.gitignore`、`gradlew*`、`gradle/`、`core/{session,network,protocol,model,rtc,media,library,account}`、
+   `desktop/{rtc,media,library}`、`desktopApp`、四份文档与 `docs/evidence`；
+2. 根 `LICENSE` 从 `desktopApp/compliance/LICENSE` 取同一个 blob（主仓库根上本来没有这个文件）；
+3. 公开版 `settings.gradle.kts`（只有 11 个模块）补一行 `include(":core:account")`；
+4. `write-tree` + `commit-tree -p 39e51c4`，得到一个**不带 Android / server 历史**的新提交。
+
+**期望结果**：三行 —— `tree=<40 位>`、`commit=<40 位>`、`files=208`。
+
+**不符期望怎么办**：
+- `工作区不干净` → 先提交或 stash；脚本刻意拒绝在脏树上切，避免把半成品公开出去。
+- `files` 不是 208 → 用 `git -C <repo> ls-tree -r --name-only <新提交>` 与 `git -C <repo> ls-tree -r --name-only windows-public` 做 `Compare-Object`，看多/少了哪一类；常见的少是新增了一个模块却忘了写进允许清单。
+- `files` 上千 → `read-tree` 没生效（临时索引是旧的），删掉 `%TEMP%\winpub-sync\winpub.idx` 重跑。
+
+**第 2 步：构建验证（不改任何东西，只是证明这份子集能独立编译、测试通过）**
+
+```powershell
+$repo='D:\AI\minimax\cinema-hall-L3'; $new='<第 1 步输出的 commit>'
+git -C $repo worktree add D:\AI\minimax\_tmp\winpub-verify $new
+$env:JAVA_HOME='C:\Program Files\Java\jdk-17.0.1'
+& 'D:\AI\minimax\cinema-hall-L3\gradlew.bat' -p 'D:\AI\minimax\_tmp\winpub-verify' :desktopApp:compileKotlin test --offline --console=plain
+# 统计用例数（控制台不打印总数，从 XML 数）
+$xs=Get-ChildItem 'D:\AI\minimax\_tmp\winpub-verify' -Recurse -Filter 'TEST-*.xml'
+$t=0;$f=0;$e=0; foreach($x in $xs){[xml]$d=Get-Content $x.FullName;$t+=[int]$d.testsuite.tests;$f+=[int]$d.testsuite.failures;$e+=[int]$d.testsuite.errors}
+"tests=$t failures=$f errors=$e"
+# 清场
+git -C $repo worktree remove D:\AI\minimax\_tmp\winpub-verify --force
+```
+
+**期望结果**：`BUILD SUCCESSFUL`（本轮 23 s）；`tests=706 failures=0 errors=0`。
+
+**不符期望怎么办**：`--offline` 报缺依赖 → 去掉 `--offline` 重跑（只影响速度，不影响结论）；
+`compileKotlin` 报 `Unresolved reference: core.account` → `settings.gradle.kts` 那行 `include(":core:account")` 没补进去，回第 1 步看脚本第 3 件事。
+
+**第 3 步：移动分支与 tag（本机操作，不联网）**
+
+```powershell
+$repo='D:\AI\minimax\cinema-hall-L3'; $new='<第 1 步输出的 commit>'
+git -C $repo branch -f windows-public $new
+git -C $repo tag -a -f windows-0.1.0 $new -m 'Windows 分发包 0.1.0 的对应源码'
+"branch=$(git -C $repo rev-parse --short windows-public)"
+"tag=$(git -C $repo rev-parse --short 'windows-0.1.0^{commit}')"
+```
+
+> tag 一定要用 `-a`（带注释）。轻量 tag 在 GitHub 的 releases 页面上不带说明，
+> 而且原 tag 本来就是注释 tag（`4a0cbd7`），保持一致。
+
+**期望结果**：两行同一个短 hash。
+
+**第 4 步：推送（这一步是公开动作，必须你亲手做）**
+
+```powershell
+git -C 'D:\AI\minimax\cinema-hall-L3' push winpub windows-public:main '+refs/tags/windows-0.1.0'
+```
+
+**期望结果**：`39e51c4..<新提交>  windows-public -> main`；`+ 39e51c4...<新提交>  windows-0.1.0 -> windows-0.1.0 (forced update)`。
+`main` 是快进（新提交的父就是 `39e51c4`），只有 tag 需要 `+` 强制。
+
+**不符期望怎么办**：
+- `Failed to connect to github.com:443` → 本机到 GitHub 时通时不通，别当成失败：直接用 `D:\AI\minimax\_tmp\push-winpub.ps1`（30 秒一轮重试；实测第 1 次就成过，也连续失败过 2 次），或把命令原样再跑。
+- `Authentication failed` / `403` → 凭据问题，重试无用，需要你处理。
+- 推送成功后**再核对一次**：打开 `https://github.com/MuYANGLLai/cinema-hall-windows/tree/windows-0.1.0`，
+  应能看到 `desktopApp/src/main/kotlin/com/cinemahall/desktop/app/account/DesktopAccount.kt` 与 `core/account/` ——
+  看得到，才说明 tag 真的指到 C7 了；看不到就是 tag 没更新成功。
 
 ---
 
@@ -455,4 +552,4 @@ Get-ChildItem .\desktopApp\build\dist\cinema-hall | Select-Object Name
 | npapi-vlc 上游 | `code.videolan.org/videolan/npapi-vlc`（`COPYING` / `activex/plugin.cpp`） | — |
 | 打包链路 | `desktopApp/build.gradle.kts` 的 `stageRelease`（第 83 行起）/ `releaseZip`（第 120 行起） | — |
 | 修复点 | 同文件：`exclude("data/**")` 第 95 行、`exclude("axvlc.dll","npvlc.dll")` 第 104 行、`exclude("msi/**")` 第 107 行、`from(complianceDir)` 第 110 行 | — |
-| 合规文件源 | `desktopApp/compliance/{LICENSE,SOURCE.txt,NOTICE-third-party.txt}` + `docs/第三方组件清单.md` | 35149 / 2524 / 43116 B |
+| 合规文件源 | `desktopApp/compliance/{LICENSE,SOURCE.txt,NOTICE-third-party.txt}` + `docs/第三方组件清单.md` | 35149 / 3490 / 43116 B |

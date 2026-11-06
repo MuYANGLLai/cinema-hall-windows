@@ -12,6 +12,7 @@ import java.io.File
  *   data/                 ← 首次启动时创建；不随 zip 分发
  *     library.json        ← 根目录 + 时长缓存
  *     settings.json
+ *     credentials.json    ← 账号 token（默认 profile；其它 profile 为 credentials-<名>.json）
  *     logs/app.log
  *     app-default.lock
  * ```
@@ -42,6 +43,18 @@ object AppPaths {
     val settingsFile: File = File(dataDir, "settings.json")
 
     fun lockFile(profile: String): File = File(dataDir, "app-$profile.lock")
+
+    /**
+     * 账号凭据文件（W7-C7）。
+     *
+     * **按 profile 分文件**：`data/` 是所有 profile 共用的（只有单实例锁按 profile 分），
+     * 而同机双实例验证要用两个不同账号 —— 共用一个 `credentials.json` 会互相覆盖，
+     * 症状是「刚激活好，另一个实例启动就变回激活页」。
+     * 默认 profile 仍叫 `credentials.json`（与文档、排障习惯一致）。
+     */
+    fun credentialsFile(profile: String): File =
+        if (profile == "default") File(dataDir, "credentials.json")
+        else File(dataDir, "credentials-$profile.json")
 
     fun ensure() {
         dataDir.mkdirs()

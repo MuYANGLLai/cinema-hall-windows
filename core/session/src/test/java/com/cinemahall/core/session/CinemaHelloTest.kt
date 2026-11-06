@@ -3,6 +3,8 @@ package com.cinemahall.core.session
 import com.cinemahall.core.media.MediaCheck
 import com.cinemahall.core.media.MediaSignature
 import com.cinemahall.core.media.MismatchReason
+import com.cinemahall.core.model.Member
+import com.cinemahall.core.model.Room
 import com.cinemahall.core.model.UserId
 import com.cinemahall.core.protocol.Envelope
 import com.cinemahall.core.protocol.PeerMessenger
@@ -24,6 +26,9 @@ class CinemaHelloTest {
 
     /** 对端 userId。阶段二起 `hello` 是定向消息，用例要能断言「发给了谁」。 */
     private val PEER = UserId("peer-user")
+
+    /** 本机 userId。角色判定（房主 / 从端）靠它和 `Room.hostUserId` 比出来。 */
+    private val MY_ID = UserId("my-user")
 
     private val head = "a".repeat(64)
     private val middle = "b".repeat(64)
@@ -265,4 +270,88 @@ class CinemaHelloTest {
         assertEquals(MediaCheck.Match, handler.mediaCheck.value.verdict)
         assertEquals(listOf("hello", "hello", "play"), handler.receivedActions.value)
     }
-}
+
+    // ── 逐成员裁决（`members`）只属于房主 ─────────────────────────────────────
+
+    /**
+     * `hello` 是**双向**的：链路一开，两侧都发。所以从端也会收到房主的 hello。
+     * 那不构成一条「成员裁决」—— 从端手上根本没有房主的匹配情况，它拿自己的
+     * 摘要去比房主的名字，只会算出一句假话。
+     *
+     * 真机症状（2026-11-06，三台模拟器）：房主在播、从端自己在同步组，成员条里
+     * 房主那一行却是「旁听（本机还没选片）」，而且从端再选片也不会刷新。
+     */
+    @Test
+    fun `从端收到房主的 hello 不会把他记成成员裁决`() {
+        val handler = CinemaHandler(Dispatchers.Unconfined)
+        handler.onRoomUpdated(room(hostUserId = PEER), MY_ID)
+
+        runBlocking {
+            handler.onMessage(CinemaHello.ACTION, envelope(CinemaHelloCodec.encode(CinemaHello(signature(), "房主"))))
+        }
+
+        assertTrue("从端的成员裁决表必须一直是空的", handler.members.value.isEmpty())
+        // 1.5 那条「对端摘要」照旧要有：它是两台设备唯一的匹配来源，两种角色都要读它。
+        assertEquals("房主", handler.mediaCheck.value.remoteNickname)
+    }
+
+    @Test
+    fun `房主收到成员的 hello 会记成逐成员裁决`() {
+        val handler = CinemaHandler(Dispatchers.Unconfined)
+        handler.onRoomUpdated(room(hostUserId = MY_ID), MY_ID)
+        handler.onLocalSignatureReady(signature())
+
+        runBlocking {
+            handler.onMessage(CinemaHello.ACTION, envelope(CinemaHelloCodec.encode(CinemaHello(signature(), "对面"))))
+        }
+
+        val row = handler.members.value.getValue(PEER)
+        assertTrue("摘要一致 ⇒ 已匹配", row.matched)
+        assertTrue("匹配上就算在看（引擎判控制权用这个）", row.watching)
+        assertNull("匹配时不该带原因", row.reason)
+        assertEquals("对面", row.nickname)
+    }
+
+    /**
+     * 真实顺序几乎总是「成员先选、房主后选」：房主一选完，成员那一条裁决必须
+     * 跟着变，而且**要重新推给他自己** —— 否则从端界面上永远停在
+     * 「旁听（本机还没选片）」，而两端的片源明明一致。
+     */
+    @Test
+    fun `房主后选片会重算成员裁决并重推一次`() {
+        val messenger = RecordingMessenger()
+        val handler = CinemaHandler(Dispatchers.Unconfined).apply {
+            bindPeerMessenger(messenger)
+            onRoomUpdated(room(hostUserId = MY_ID), MY_ID)
+        }
+        // 成员先报 hello。房主这会儿还没选片 ⇒ 裁决是「不匹配」。
+        runBlocking {
+            handler.onMessage(CinemaHello.ACTION, envelope(CinemaHelloCodec.encode(CinemaHello(signature(), "对面"))))
+        }
+        assertFalse(handler.members.value.getValue(PEER).matched)
+        messenger.sent.clear()
+
+        // 房主随后选片（同一份摘要）。
+        handler.onLocalSignatureReady(signature())
+
+        val row = handler.members.value.getValue(PEER)
+        assertTrue("房主选完之后这个人就该是已匹配", row.matched)
+        assertNull(row.reason)
+
+        val pushed = messenger.sent.filter { it.first == CinemaPlayback.TYPE_MEDIA_STATUS }
+        assertEquals("裁决变了要重推一次", 1, pushed.size)
+        assertEquals(PEER, pushed.single().third)
+        assertTrue(
+            "推出去的那条必须说 matched=true",
+            CinemaPlaybackCodec.decodeMediaStatus(pushed.single().second)?.matched == true,
+        )
+    }
+
+    /** 只有 `PEER` 一个成员的房；`hostUserId` 决定本机是不是房主。 */
+    private fun room(hostUserId: UserId) = Room(
+        roomId = "AB23CD",
+        hostUserId = hostUserId,
+        mode = "cinema",
+        members = listOf(Member(PEER, "对面", online = true)),
+        modeState = null,
+    )}

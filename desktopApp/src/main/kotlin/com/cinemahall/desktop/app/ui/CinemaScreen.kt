@@ -187,8 +187,8 @@ private fun ConnectPanel(
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                "默认 $DEFAULT_SIGNAL_ENDPOINT（本机开发服务）。连朋友那台机器就填它的局域网地址，" +
-                    "形如 ws://192.168.1.10:8080。",
+                "默认 $DEFAULT_SIGNAL_ENDPOINT（线上服务）。自建服务器就填它的地址，" +
+                    "本机开发形如 ws://192.168.1.10:8080。",
                 style = MaterialTheme.typography.labelSmall,
                 color = colors.ink3,
             )

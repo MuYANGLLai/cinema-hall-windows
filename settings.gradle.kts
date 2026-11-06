@@ -30,6 +30,7 @@ include(":core:network")
 include(":core:rtc")
 include(":core:media")
 include(":core:library")
+include(":core:account")
 include(":core:session")
 
 include(":desktop:media")

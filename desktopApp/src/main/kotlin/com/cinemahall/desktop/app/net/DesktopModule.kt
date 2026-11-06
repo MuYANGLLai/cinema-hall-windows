@@ -49,10 +49,22 @@ import java.util.UUID
  * 但永远不建链」，且没有任何报错。
  */
 class DesktopModule(
-    /** 信令服务地址（`ws://host:port`）。 */
+    /** 信令服务地址（`ws://host:port` 或 `wss://host:port/ws`）。 */
     private val endpoint: String,
-    /** 本机身份。桌面没有账号系统，用持久化的设备 id。 */
+    /** 本机身份。激活态 = 账号的 `deviceId`；`AUTH_MODE=off` 时回退到持久化设备 id。 */
     val myUserId: UserId,
+    /**
+     * 握手用的 bearer token（W7-C7）。
+     *
+     * `WsSignaler` 只会在**建连那一刻**同步取一次（`openSocket` 里贴
+     * `Authorization: Bearer …`），所以这里给的是「同步读内存」的函数，
+     * 不是 `suspend` 的凭据读取 —— 一次握手不该去解密磁盘。
+     *
+     * 默认 `null` 时**不贴头**，供 `AUTH_MODE=off` 的本地开发与既有门禁沿用。
+     * 生产是 `AUTH_MODE=required`：没有这个头会被 `verifyClient` 直接 401
+     * （客户端表现为 `Connecting → Reconnecting` 的退避循环，永远到不了建房）。
+     */
+    private val authToken: () -> String? = { null },
 ) {
 
     /** 全进程同源的那条单调时间轴（`System.nanoTime()/1e6`，`core:model` 就是这么定义的）。 */
@@ -92,6 +104,9 @@ class DesktopModule(
         // 与 `CinemaHandler` / `PeerCoordinator` 同一个实例：信封的 `sentAtMs` 与
         // 同步引擎的时间轴必须是同一条，否则量出来的 RTT 里混着两种时钟的差值。
         monotonicMs = { clock.nowMs() },
+        // 生产（`AUTH_MODE=required`）在握手阶段就要这枚 token，见 ServerSignaling
+        // 的 `verifyClient`。回调是同步的：`openSocket()` 里直接贴头。
+        authToken = authToken,
     )
 
     private val rtcBackend = WebRtcBackend()
@@ -150,6 +165,9 @@ class DesktopModule(
 
     private var rtcLogJob: kotlinx.coroutines.Job? = null
 
+    /** 信令状态日志的订阅；只建一次（重复 `connect()` 不该叠加）。 */
+    private var stateLogJob: kotlinx.coroutines.Job? = null
+
     /**
      * 建协调者并把它接到玩法上。**可以重复调用**（界面重建、换账号），已存在时直接返回。
      *
@@ -206,6 +224,14 @@ class DesktopModule(
     /** 连服务端。必须先 [ensureCoordinator]。 */
     fun connect() {
         ensureCoordinator()
+        // 状态迁移留痕（W7-C7）：生产开着 `AUTH_MODE=required`，握手被 401 时
+        // `WsSignaler` 会一直退避重连，界面上只是「正在重连」。这一行是判断
+        // 「到底连上没有」的唯一客户端证据 —— `Online` 出现即握手通过。
+        if (stateLogJob == null) {
+            stateLogJob = scope.launch {
+                signaler.state.collect { state -> Log.info("[signal] state=$state endpoint=$endpoint") }
+            }
+        }
         scope.launch {
             runCatching { signaler.connect(endpoint, myUserId) }
                 .onFailure { Log.warn("[signal] 连接 $endpoint 失败：${it.message}") }
@@ -222,7 +248,19 @@ class DesktopModule(
      * 后者由 userId 字典序决定，两者成因无关。
      */
     suspend fun onRoomChanged() = withContext(Dispatchers.Swing) {
-        handler.onRoomUpdated(signaler.room.value, myUserId)
+        val room = signaler.room.value
+        handler.onRoomUpdated(room, myUserId)
+        // 排障（W7-C7）：房间视图每次变化留一行。桌面上没有 logcat，用户报
+        // 「对方看不到我」时，这一行是区分「压根没进房」与「进房了但对端没上线」
+        // 的唯一依据；`members`/`online` 两个数也是本轮验收要看的读数。
+        if (room == null) {
+            Log.info("[room] 已离开（self=${myUserId.value}）")
+        } else {
+            Log.info(
+                "[room] id=${room.roomId} members=${room.members.size} online=${room.onlineCount} " +
+                    "host=${room.hostUserId.value == myUserId.value} self=${myUserId.value}",
+            )
+        }
     }
 
     /** 界面用：重发一次本机片源摘要（对端重启过、或它的接收状态丢过一次时用）。 */
@@ -238,6 +276,8 @@ class DesktopModule(
 
     fun close() {
         runCatching { rtcLogJob?.cancel() }
+        runCatching { stateLogJob?.cancel() }
+        stateLogJob = null
         val created = coordinator
         coordinator = null
         // 玩法先收自己那一份（可能还要调链路：停通话、清定时器），它内部自己切线程。

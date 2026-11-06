@@ -45,6 +45,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.cinemahall.core.library.ScanBucket
+import com.cinemahall.core.model.UserId
 import com.cinemahall.core.network.SignalErrors
 import com.cinemahall.core.network.SignalException
 import com.cinemahall.core.network.SignalState
@@ -55,6 +56,8 @@ import com.cinemahall.desktop.app.KeepAwake
 import com.cinemahall.desktop.app.Log
 import com.cinemahall.desktop.app.LocalCinemaColors
 import com.cinemahall.desktop.app.PlayerController
+import com.cinemahall.desktop.app.account.AccountPhase
+import com.cinemahall.desktop.app.account.DesktopAccount
 import com.cinemahall.desktop.app.net.DesktopModule
 import com.cinemahall.desktop.library.DesktopMovie
 import com.cinemahall.desktop.library.DesktopMovieCatalog
@@ -107,11 +110,26 @@ class CinemaHolder {
      */
     var autoConnectPending: Boolean = true
 
-    fun connect(endpoint: String, nickname: String, identityOverride: String? = null): DesktopModule {
+    /**
+     * 建模块并连信令。
+     *
+     * 身份优先级（W7-C7 起）：**账号的 deviceId** > `--identity` 覆盖 > `identity.txt`。
+     * 第一项是硬要求：服务端在 `AUTH_MODE != off` 时用握手鉴权出来的 `deviceId`
+     * 当房间身份（`ctx.userId = auth.deviceId`），本机若继续用 `identity.txt` 那个
+     * 随机 id，两边对「我是谁」的答案就不一致。
+     */
+    fun connect(
+        endpoint: String,
+        nickname: String,
+        identityOverride: String? = null,
+        accountUserId: UserId? = null,
+        authToken: () -> String? = { null },
+    ): DesktopModule {
         close()
-        val mine = identityOverride?.takeIf { it.isNotBlank() }?.let { com.cinemahall.core.model.UserId(it) }
+        val mine = accountUserId
+            ?: identityOverride?.takeIf { it.isNotBlank() }?.let { UserId(it) }
             ?: DesktopModule.loadOrCreateUserId()
-        val created = DesktopModule(endpoint = endpoint, myUserId = mine)
+        val created = DesktopModule(endpoint = endpoint, myUserId = mine, authToken = authToken)
         // 昵称要在进房之前就交给玩法：`cinema.hello` 里带的就是它。
         created.handler.localNickname = nickname
         created.connect()
@@ -149,10 +167,55 @@ fun AppRoot(
      * 收尾必须由「一定会被调到的那条路径」负责，这就是 `cleanup()`。
      */
     cinema: CinemaHolder,
+    /**
+     * 账号门（W7-C7）。**由 `Main` 建**：它要活过组合，而且 `--activate=` 这条
+     * 门禁路径在窗口出现之前就要能把激活做完。
+     */
+    account: DesktopAccount,
     initialScreen: Screen = Screen.Home,
     cinemaAuto: CinemaAuto? = null,
     identityOverride: String? = null,
+    /** `--signal-endpoint` 的显式覆盖（null = 用 settings / 内置默认）。 */
+    endpointOverride: String? = null,
 ) {
+    // ── 账号门（W7-C7）：没有有效 token 就不建模块、不连信令 ──────────────────
+    // 生产是 `AUTH_MODE=required`：握手不带 bearer token 会被服务端直接 401，
+    // 而 `WsSignaler` 把 401 当成普通断线一直退避重连 —— 用户看到的是一串
+    // 「正在重连」，真正的原因（没激活）从头到尾没出现过。所以门放在最前面。
+    //
+    // 地址优先级：`--signal-endpoint` > settings.json > 内置默认（生产）。
+    // 少这一层的话，「用本机服务端跑验证」会激活在本机、连却连到生产。
+    val resolvedEndpoint = (endpointOverride ?: settings.signalEndpoint)
+        .trim().ifBlank { DEFAULT_SIGNAL_ENDPOINT }
+    LaunchedEffect(resolvedEndpoint) {
+        // 幂等：地址没变且已 Ready 时不会把状态打回 Loading（见 `ensureReady` 的注释）。
+        account.ensureReady(resolvedEndpoint)
+    }
+
+    when (account.phase) {
+        AccountPhase.Loading -> {
+            AccountLoadingScreen()
+            return
+        }
+
+        is AccountPhase.NeedsActivation -> {
+            ActivationScreen(
+                account = account,
+                currentEndpoint = resolvedEndpoint,
+                onEndpointChange = { updated ->
+                    onSettingsChange(settings.copy(signalEndpoint = updated))
+                },
+                // 激活成功后不需要在这里做什么：`account.phase` 变 Ready，
+                // 重组自然走进下面的主界面；影厅页自己的 `LaunchedEffect`
+                // 会负责首次连接。
+                onActivated = {},
+            )
+            return
+        }
+
+        is AccountPhase.Ready -> Unit
+    }
+
     val colors = LocalCinemaColors.current
     var screen by remember { mutableStateOf(initialScreen) }
     var current by remember { mutableStateOf(initialMovie) }
@@ -170,10 +233,15 @@ fun AppRoot(
     // （切到影片库、设置页都不影响房间与链路 —— 那正是"会话级"的语义）。
     // 生命周期归 [cinema] 的持有者（Main 建、Main 的 cleanup 关）。
     var endpoint by remember {
-        mutableStateOf(settings.signalEndpoint.ifBlank { DEFAULT_SIGNAL_ENDPOINT })
+        mutableStateOf(resolvedEndpoint)
     }
     var nickname by remember {
-        mutableStateOf(settings.signalNickname.ifBlank { DesktopModule.defaultNickname() })
+        // 优先用**账号昵称**（激活时填的那个）：房间成员表里显示「房主A」比显示
+        // 操作系统用户名「LLai」更像回事，而且两台机器用同一账号名时也分得开。
+        mutableStateOf(
+            account.displayNameOrNull()
+                ?: settings.signalNickname.ifBlank { DesktopModule.defaultNickname() },
+        )
     }
     var connecting by remember { mutableStateOf(false) }
     var connectError by remember { mutableStateOf<String?>(null) }
@@ -192,7 +260,28 @@ fun AppRoot(
         connecting = true
         connectError = null
         scope.launch {
-            val created = runCatching { cinema.connect(resolved, who, identityOverride) }
+            // 地址被改过（设置页 / 激活页）：先让账号层跟着换 —— 否则会把 A 服务器的
+            // token 发给 B 服务器（结果是一串 401，看起来像「账号失效」）。
+            if (resolved != account.signalEndpoint) {
+                account.ensureReady(resolved)
+            }
+            // 门在这一刻仍然是硬条件：`--activate` 之后账号可能因为换地址而变回
+            // 「需要激活」，那就不要建模块（否则又会拿空 token 去握手）。
+            if (account.phase !is AccountPhase.Ready) {
+                connecting = false
+                return@launch
+            }
+            val created = runCatching {
+                cinema.connect(
+                    endpoint = resolved,
+                    nickname = who,
+                    identityOverride = identityOverride,
+                    // 激活态下身份以账号的 deviceId 为准（服务端就是这么绑的）。
+                    accountUserId = account.userIdOrNull(),
+                    // 握手时同步取一次；`WsSignaler` 只读不写，token 不进日志。
+                    authToken = { account.tokenOrNull() },
+                )
+            }
             created.onFailure { connectError = it.message ?: it::class.java.simpleName }
             // `connect()` 只是发起：它不等连上，连不上也会自己退避重连。界面不能
             // 一直转圈，所以这里给它 6 秒窗口，拿 `SignalState.Online` 当判据。
@@ -201,6 +290,15 @@ fun AppRoot(
             } != null
             connecting = false
             if (created.isSuccess && !online) {
+                // 连不上有两种可能：网络/地址错，或者 token 已经不能用了（401）。
+                // 后者在 `WsSignaler` 眼里只是「连接异常（HTTP 401）」+ 退避重连，
+                // 所以用账号接口做一次权威判定：真失效就清凭据、停模块、回激活页，
+                // **不要**对着服务端无限重连。
+                if (!account.revalidate()) {
+                    runCatching { cinema.close() }
+                    connectError = null
+                    return@launch
+                }
                 connectError = "6 秒内没连上 $resolved（服务端没起？地址不对？）"
             } else if (online) {
                 onSettingsChange(settings.copy(signalEndpoint = resolved, signalNickname = who))
@@ -210,8 +308,15 @@ fun AppRoot(
 
     // 第一次进影厅页时自动连一次。用户主动按过「断开」之后不再自动重连 ——
     // 否则那个按钮等于按了个假的。
-    LaunchedEffect(screen) {
-        if (screen == Screen.Cinema && cinema.module == null && cinema.autoConnectPending) {
+    LaunchedEffect(screen, account.phase) {
+        val ready = account.phase is AccountPhase.Ready
+        Log.info(
+            "[cinema] 自动连接判定：screen=$screen module=${cinema.module != null} " +
+                "pending=${cinema.autoConnectPending} ready=$ready",
+        )
+        // 必须在 **Ready 的那一刻**才消费 `autoConnectPending`：早先只看 screen，
+        // 于是「激活后 state 短暂回到 Loading」会让这次消费白扔，之后再也不连。
+        if (screen == Screen.Cinema && cinema.module == null && cinema.autoConnectPending && ready) {
             cinema.autoConnectPending = false
             connectCinema()
         }

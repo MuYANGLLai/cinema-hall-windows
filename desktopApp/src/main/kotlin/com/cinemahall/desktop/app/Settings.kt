@@ -4,8 +4,27 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
 
-/** 内置默认信令地址：本机开发服务（与 `server/src/config.mjs` 的默认端口一致）。 */
-const val DEFAULT_SIGNAL_ENDPOINT: String = "ws://127.0.0.1:8080"
+/**
+ * 内置默认信令地址：**生产**（与 Android 的 `SignalPreferences.DEFAULT_ENDPOINT` 逐字一致）。
+ *
+ * 改过一次：W7 时写的是 `ws://127.0.0.1:8080`（本机开发服务），那对「发给朋友的包」
+ * 是错的 —— 对方打开看到的是「6 秒内没连上 127.0.0.1」，而 127.0.0.1 在他机器上
+ * 根本没有服务。开发时用 `--signal-endpoint=ws://127.0.0.1:8080` 覆盖即可，
+ * 自检参数的语义不变。
+ */
+const val DEFAULT_SIGNAL_ENDPOINT: String = "wss://101.133.234.226:8443/ws"
+
+/**
+ * 上报给服务端的版本号（激活时写进设备的 `appVersion`）。
+ *
+ * 与 `build.gradle.kts` 的 `packageVersion` 手工保持一致 —— 那个值是 jpackage 的
+ * 打包参数，运行期拿不到（`jpackage.app-version` 只在安装器上下文里有）。
+ * 发版时两处一起改；不一致的后果只是服务端设备列表里显示旧版本号。
+ */
+const val DESKTOP_APP_VERSION: String = "0.1.0"
+
+/** 上报给服务端的平台标识（与 Android 的 `PLATFORM_ANDROID` 同一套命名）。 */
+const val DESKTOP_PLATFORM: String = "windows"
 
 /**
  * 桌面端的用户设置（W3）。
