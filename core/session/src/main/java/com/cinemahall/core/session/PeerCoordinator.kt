@@ -207,7 +207,8 @@ class PeerCoordinator(
     private val idleDiagnostics = MutableStateFlow(PeerDiagnostics())
     private val idleRemote = MutableStateFlow<UserId?>(null)
     private val idleIsOfferer = MutableStateFlow<Boolean?>(null)
-    private val idleCallAudio = MutableStateFlow(CallAudioState())
+    /** 对外发布的通话状态（由 [publishCallAudio] 维护，别直接改）。 */
+    private val _callAudio = MutableStateFlow(CallAudioState())
 
     val stats: StateFlow<LinkStats?> get() = primary?.stats ?: idleStats
 
@@ -298,8 +299,46 @@ class PeerCoordinator(
      * 真正的房间级音频会话（一份采集挂 N-1 个 sender）是 P3 的 `RoomAudioSession`；
      * 在那之前，本层把同一个意图逐条下发，行为与两人房一致、多人房可用。
      */
-    override val callAudio: StateFlow<CallAudioState>
-        get() = primary?.callAudio ?: idleCallAudio
+    override val callAudio: StateFlow<CallAudioState> = _callAudio.asStateFlow()
+
+    /**
+     * 对外发布的通话状态：**意图取本层，测量值跨链路聚合**。
+     *
+     * ── 为什么不再直接转发主链路（2026-11-06 真机缺陷）────────────────────────
+     * 原实现是 `primary?.callAudio`，而 `primary` 只是「字典序最小的那个对端」这个
+     * 兼容面（见上方 KDoc）。三人房里用户按「开启通话」时，意图是**逐条**下发的，
+     * 每条链路各自在自己的协程里异步发布结果；只要主链路那一条没把发布落地
+     * （链路正在拆、或音频根本不走它），界面读到的 `requested` 就一直是 `false`。
+     * 真机症状：「通话确实开了、也听得到，按钮却停在『开启通话』」——再点一下
+     * 等于又发了一次「开」，用户永远关不掉。
+     *
+     * 修法沿用本文件一贯的口径：**意图只有一个来源**（[_callIntent]），链路只报测量值。
+     * `sending` / `receiving` 用「任一条链路」而不是主链路，因为三人房里音频确实可能
+     * 只落在另一条上；`remoteSending` 取「有一条说 true 就算 true」，免得另一个对端
+     * 正常发送时状态行还说「对端没开通话」。
+     */
+    private fun publishCallAudio() {
+        val all = _links.value.values.map { it.callAudio.value }
+        val measured = _links.value.values
+            .firstOrNull { it.callAudio.value.sending || it.callAudio.value.receiving }
+            ?.callAudio?.value
+            ?: primary?.callAudio?.value
+            ?: CallAudioState()
+        _callAudio.value = measured.copy(
+            requested = callIntent,
+            sending = all.any { it.sending },
+            receiving = all.any { it.receiving },
+            remoteSending = when {
+                all.any { it.remoteSending == true } -> true
+                all.any { it.remoteSending == false } -> false
+                else -> null
+            },
+            // 包计数是 `Long?`（没读到就是 null）：有读数才相加，一条都没有时保持 null，
+            // 否则界面会把「还没读过 stats」显示成「0 包」—— 那是两种完全不同的结论。
+            audioPacketsSent = all.mapNotNull { it.audioPacketsSent }.takeIf { it.isNotEmpty() }?.sum(),
+            audioPacketsReceived = all.mapNotNull { it.audioPacketsReceived }.takeIf { it.isNotEmpty() }?.sum(),
+        )
+    }
 
     /**
      * 开 / 关通话。**逐条下发**给当前所有链路，并把意图记下来给**将来**的链路用。
@@ -330,7 +369,10 @@ class PeerCoordinator(
             )
             lastCallIntent = enabled
         }
-        callIntent = enabled
+        // 意图先落地再下发：界面读的是本层发布的状态，不能等某条链路的协程排到。
+        // 先发布这一句，正是「按了开关按钮立刻变成『关闭通话』」的来源。
+        _callIntent.value = enabled
+        publishCallAudio()
         for (link in _links.value.values) link.setCallEnabled(enabled)
     }
 
@@ -368,7 +410,10 @@ class PeerCoordinator(
      * 没有它的话，「先按开麦、后有人进房」这条路上新对端永远听不见 —— 而界面上
      * 开关明明是开着的（它读的是主链路的状态，主链路是别人）。
      */
-    private var callIntent: Boolean = false
+    private val _callIntent = MutableStateFlow(false)
+
+    /** 房间级意图的真值（[publishCallAudio] 与 [startLink] 都读它）。 */
+    private val callIntent: Boolean get() = _callIntent.value
 
     /**
      * 上一次**由本层下达**的通话意图，只用于去重日志。
@@ -935,6 +980,12 @@ class PeerCoordinator(
                 // 每次都通知一遍会让玩法把同一件事重复清空。
                 link.state.collect { state -> onLinkState(peer, state) }
             },
+            // 链路自己会在协程里异步发布通话读数；对外状态由本层重算（见 publishCallAudio）。
+            // 少了这一条，某条链路「开着麦」的事实永远进不了界面的聚合读数 —— 三人房里
+            // 音频只落在非主链路上时，按钮就会停在「开启通话」。
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                link.callAudio.collect { publishCallAudio() }
+            },
         )
         linkJobs[peer] = jobs
 
@@ -949,6 +1000,8 @@ class PeerCoordinator(
         // 房间级的通话意图要跟着新链路走：没有这一句，「先按开麦、后有人进房」
         // 那条路上新对端永远听不见（而界面上的开关是开着的，因为它读的是主链路）。
         if (callIntent) link.setCallEnabled(true)
+        // 新链路一登记就重算一次：`primary` 可能换了人，按钮读的聚合状态要跟着换。
+        publishCallAudio()
         if (_relayOnly.value) link.setTransportPolicy(TransportPolicy.RELAY_ONLY)
         if (iceServers.isNotEmpty()) link.setIceServers(iceServers)
     }
@@ -970,6 +1023,8 @@ class PeerCoordinator(
         _links.value = _links.value - peer
         linkConnected.remove(peer)
         recomputeState()
+        // 走掉的那条可能正是主链路：按钮的聚合状态必须立刻跟着换人。
+        publishCallAudio()
         if (notifyClosed && wasConnected) onPeerChannelClosed(peer)
     }
 
@@ -984,8 +1039,9 @@ class PeerCoordinator(
         for (peer in _links.value.keys.toList()) teardown(peer, reason = null)
         // `callIntent` 与 `lastCallIntent` 一起归零：下一场会话从「关」开始，
         // 无论上一场是怎么结束的（1.11 那条「进房仍自动开通话」的结构性修法）。
-        callIntent = false
+        _callIntent.value = false
         lastCallIntent = false
+        publishCallAudio()
     }
 
     /** 某条链路的状态变了：更新聚合状态、必要时派发「通了 / 断了」回调。 */

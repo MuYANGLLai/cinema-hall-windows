@@ -11,7 +11,10 @@ import com.cinemahall.core.session.DefaultMonotonicClock
 import com.cinemahall.core.session.PeerCoordinator
 import com.cinemahall.desktop.app.AppPaths
 import com.cinemahall.desktop.app.Log
+import com.cinemahall.desktop.app.rtc.Command
+import com.cinemahall.desktop.rtc.AecChain
 import com.cinemahall.desktop.rtc.DesktopPeerLink
+import com.cinemahall.desktop.rtc.ProcessAudioHelper
 import com.cinemahall.desktop.rtc.SingleThreadDispatcher
 import com.cinemahall.desktop.rtc.WebRtcBackend
 import com.cinemahall.desktop.rtc.WebRtcEngine
@@ -150,7 +153,21 @@ class DesktopModule(
             pendingLink = null
             claimed
         } else {
-            DesktopPeerLink(rtcBackend, linkDispatcher).also { currentLink = it }
+            // ⚠️ 语音上行必须在这里接：`uplink` 的默认值是 null，而空值会让
+            // `setCallEnabled(true)` 直接落到「本机没有接入音频采集」那一支 ——
+            // 真机症状是「点了开启麦克风，红字不动、收发永远是 `-`」，
+            // 看起来像麦克风坏了，其实是这条装配从来没接上（2026-11-06 用户报）。
+            //
+            // 为什么**每条链路**一份：`DesktopPeerLink` 是一条 PeerConnection 的 owner，
+            // 采集到的 PCM 要各自 `pushCapturePcm` 进自己的 backend。房间级共享采集
+            // （一份采集挂 N-1 个 sender）是后续 `RoomAudioSession` 的事；在那之前
+            // 三人房里会有 2 个 helper 子进程，这是已知代价（每人一份系统麦克风会话）。
+            DesktopPeerLink(
+                rtcBackend,
+                linkDispatcher,
+                uplink = ProcessAudioHelper(Command.audioHelper()),
+                aec = AecChain(),
+            ).also { currentLink = it }
         }
     }
 

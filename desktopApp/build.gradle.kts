@@ -13,6 +13,15 @@ kotlin {
     jvmToolchain(17)
 }
 
+/**
+ * Windows 分发版本号 —— **唯一一处**。
+ *
+ * 之前 `packageVersion` 与 `releaseZip` 的文件名各写各的，改版本时漏掉一处，
+ * 就出现了「zip 叫 0.1.1、包里是 0.1.2」的包：只有版本号变了而名字没变，
+ * 发出去没人能一眼看出是哪一版。现在两处都读它，改名只改这一行。
+ */
+val winVersion = "0.1.2"
+
 dependencies {
     implementation(project(":desktop:media"))
     implementation(project(":desktop:library"))
@@ -53,7 +62,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.AppImage)
             packageName = "cinema-hall"
-            packageVersion = "0.1.1"
+            packageVersion = winVersion
             // ⚠️ 这里**故意只放 ASCII**。
             // Compose 插件把参数写成 UTF-8 的 `@args.txt` 交给 jpackage，而 Windows 上的
             // jpackage 按**系统代码页**读那个文件。本机是 GBK，一旦 `--description` 里出现
@@ -120,6 +129,16 @@ val stageRelease by tasks.registering(Sync::class) {
         rename { "使用说明.md" }
     }
     into(layout.buildDirectory.dir("dist/cinema-hall"))
+
+    // ⚠️ `Sync` 的语义是「镜像」：目标目录里多出来的东西一律删掉，而用户运行后生成的
+    // `data/` 正在那个目录里（`AppPaths.dataDir = appRoot/data`）。不 preserve 的话，
+    // 每次重建包都会把用户的**账号 token**（`data/credentials.json`）、片单、设置、日志
+    // 一起清掉 —— 症状是「昨天还好好的，今天一开机又要激活」，且看不出是被打包清掉的。
+    // 注意上面那两条 `exclude("data/**")` 只挡「从 appImageRoot 搬进 dist」，
+    // 挡不住 Sync 自己的删除动作，两件事必须分开做。
+    preserve {
+        include("data/**")
+    }
 }
 
 tasks.register<Zip>("releaseZip") {
@@ -134,7 +153,9 @@ tasks.register<Zip>("releaseZip") {
         exclude("**/data/**")
         exclude("**/*.log")
     }
-    archiveFileName.set("cinema-hall-windows-0.1.1.zip")
+    // 名字必须跟着 packageVersion 走：写死过一次 0.1.1，结果包里是 0.1.2 的内容，
+    // 只有版本号变了而文件名没变 —— 这种包发出去没人能一眼看出是哪一版。
+    archiveFileName.set("cinema-hall-windows-$winVersion.zip")
     destinationDirectory.set(layout.buildDirectory.dir("dist"))
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true

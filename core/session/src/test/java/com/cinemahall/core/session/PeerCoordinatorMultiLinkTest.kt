@@ -316,6 +316,55 @@ class PeerCoordinatorMultiLinkTest {
 
     private fun payload(): JsonObject = buildJsonObject { put("positionMs", 0) }
 
+    // ── 通话开关的对外状态（2026-11-06 真机缺陷）────────────────────────────────
+
+    @Test
+    fun `链路没把通话发布出来时按钮也必须跟着意图走`() = runBlocking {
+        // 真机症状：三人房里点「开启通话」，通话确实开了也听得到，按钮却停在「开启通话」。
+        // 根因是对外状态曾直接转发**主链路**（字典序最小的对端）的异步发布结果 ——
+        // 那一条没落地，界面就永远读不到 `requested = true`，用户再点一下等于又发一次「开」。
+        val (coordinator, signaler, _) = newCoordinator()
+        signaler.pushIce()
+        signaler.room.value = room(members = listOf(ME to true, ALICE to true))
+
+        coordinator.setCallEnabled(true)
+
+        assertTrue(
+            "意图已经下达，对外状态必须立刻是「开」—— 不能等某条链路的协程排到",
+            coordinator.callAudio.value.requested,
+        )
+    }
+
+    @Test
+    fun `主链路不承载音频时收发读数取任意一条链路`() = runBlocking {
+        // 三人房里音频可能只落在非主链路（主链路是字典序最小的那个对端）。
+        // 旧实现读主链路 ⇒ 按钮「开启通话」、状态行「等音频通道建立」，而实际在发。
+        val (coordinator, signaler, links) = newCoordinator()
+        signaler.pushIce()
+        signaler.room.value = room(members = listOf(ME to true, ALICE to true, BOB to true))
+
+        coordinator.setCallEnabled(true)
+
+        // 主链路（ALICE）什么都不报；BOB 那条真的在发、而对端那条 m 行是 sendrecv。
+        links.of(BOB).publishCallAudio(
+            CallAudioState(
+                requested = true,
+                sending = true,
+                receiving = true,
+                remoteSending = true,
+                audioPacketsSent = 120,
+                audioPacketsReceived = 90,
+            ),
+        )
+
+        val state = coordinator.callAudio.value
+        assertTrue("任何一条链路在发 ⇒ 界面就应当说在发", state.sending)
+        assertTrue("任何一条链路在收 ⇒ 界面就应当说在收", state.receiving)
+        assertEquals("对端方向取「有一条说 true 就算 true」", true, state.remoteSending)
+        assertEquals("包计数是跨链路相加", 120L, state.audioPacketsSent)
+        assertEquals(90L, state.audioPacketsReceived)
+    }
+
     private companion object {
         val ME = UserId("aaaaaaaa-me")
         val ALICE = UserId("bbbbbbbb-alice")
@@ -365,7 +414,13 @@ class PeerCoordinatorMultiLinkTest {
 
         override val isOfferer: StateFlow<Boolean?> = MutableStateFlow(null)
 
-        override val callAudio: StateFlow<CallAudioState> = MutableStateFlow(CallAudioState())
+        private val _callAudio = MutableStateFlow(CallAudioState())
+        override val callAudio: StateFlow<CallAudioState> get() = _callAudio
+
+        /** 把这条链路推到某个通话读数（真链路是异步发布的，用例直接摆位最省事）。 */
+        fun publishCallAudio(state: CallAudioState) {
+            _callAudio.value = state
+        }
 
         /** 这条链路上发出的所有信封原文。 */
         val sent = mutableListOf<String>()
