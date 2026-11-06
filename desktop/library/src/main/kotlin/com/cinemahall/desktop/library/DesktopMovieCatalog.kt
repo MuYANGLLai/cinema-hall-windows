@@ -363,9 +363,25 @@ class DesktopMovieCatalog(
             durationCache.clear()
             durationCache.putAll(stored.durations)
         }
-        _movies.value = stored.movies
-            .map { DesktopMovie(it.path, it.fileName, it.sizeBytes, it.modifiedAtMs, it.durationMs) }
-            .sortedWith(movieOrder)
+        // ── 老库的迁移（2026-11-06）─────────────────────────────────────────────
+        // 0.1.6 及以前的 `library.json` 只有「根目录 + 时长缓存」，没有 `movies`。
+        // 直接按新格式读就会得到「0 部」，用户升级后第一眼看到的是「我的库空了」——
+        // 而时长缓存里的每一项都够还原一条影片（路径、大小、修改时间、时长），
+        // 文件名取路径末段即可。所以 `movies` 为空时用它兜底重建；不为空就以 `movies` 为准。
+        val restored = if (stored.movies.isNotEmpty()) {
+            stored.movies.map { DesktopMovie(it.path, it.fileName, it.sizeBytes, it.modifiedAtMs, it.durationMs) }
+        } else {
+            stored.durations.map { (path, cached) ->
+                DesktopMovie(
+                    path = path,
+                    fileName = File(path).name,
+                    sizeBytes = cached.sizeBytes,
+                    modifiedAtMs = cached.modifiedAtMs,
+                    durationMs = cached.durationMs,
+                )
+            }
+        }
+        _movies.value = restored.sortedWith(movieOrder)
     }
 
     private fun persist() {

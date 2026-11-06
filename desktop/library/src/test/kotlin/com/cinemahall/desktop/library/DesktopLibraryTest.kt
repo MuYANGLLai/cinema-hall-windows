@@ -177,6 +177,33 @@ class DesktopMovieCatalogTest {
     }
 
     @Test
+    fun `老版本只有时长缓存的库也能恢复影片列表`() {
+        // 0.1.6 落盘的样子：`movies` 这个键根本不存在，只有 roots + durations。
+        val store = File(temp.root, "library.json")
+        store.writeText(
+            """
+            {
+                "version": 1,
+                "roots": ["D:\\Movies"],
+                "durations": {
+                    "D:\\Movies\\old-a.mkv": {"sizeBytes": 100, "modifiedAtMs": 1, "durationMs": 5400000},
+                    "D:\\Movies\\old-b.mp4": {"sizeBytes": 200, "modifiedAtMs": 2, "durationMs": 3600000}
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val reopened = DesktopMovieCatalog(store, probe = { 0L })
+
+        assertEquals(
+            listOf("old-a.mkv", "old-b.mp4"),
+            reopened.movies.value.map { it.fileName },
+        )
+        assertTrue("升级后不该看到「0 部」，时长也要在", reopened.movies.value.all { it.durationMs > 0 })
+        assertEquals(listOf("D:\\Movies"), reopened.roots.value)
+    }
+
+    @Test
     fun `扫描 500 个文件应在可接受时间内完成`() {        val root = temp.newFolder("Big")
         repeat(500) { index ->
             val bucket = File(root, "cat${index % 10}").apply { mkdirs() }
