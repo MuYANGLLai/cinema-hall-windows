@@ -105,6 +105,15 @@ class DesktopPeerLink(
     val audioAttachNote: String get() = backend.audioAttachNote
 
     /**
+     * 门禁/诊断：这条链路到底有没有接上上行采集。
+     *
+     * `false` = 点开麦克风只会报「本机没有接入音频采集」—— 那是**装配缺失**，不是设备坏。
+     * 它是 `0.1.2` 那条真机缺陷的直接读数（界面先造出来的空壳链路丢掉了 `uplink`），
+     * 所以自检行里会打印它，别只信「链路已连通」。
+     */
+    val hasAudioUplink: Boolean get() = uplink != null
+
+    /**
      * 门禁/诊断：通过入口条件、真进了状态机的信号条数。
      *
      * 与 [receivedSignals] 的差就是「到了这一层但被前置条件丢掉」的那几条 ——

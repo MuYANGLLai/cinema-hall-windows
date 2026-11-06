@@ -202,7 +202,7 @@ fun runSessionSelfTest(role: String, endpoint: String, roomId: String, seconds: 
         "signals=${module.link.receivedSignals}/${module.link.lastSignalKind} " +
         "acc=${module.link.acceptedSignals} drop=[${module.link.lastDrop}] " +
         "coord=${module.coordinatorCreations} sig=$lastSig ice=$lastIce dc=$lastDc iceCfg=$iceCfg " +
-        "note=[$lastNote] audio=[${module.link.audioAttachNote}] notes=[$notes]"
+        "note=[$lastNote] audio=[${module.link.audioAttachNote}] uplink=${module.link.hasAudioUplink} notes=[$notes]"
     println(line)
     Log.info(line)
 

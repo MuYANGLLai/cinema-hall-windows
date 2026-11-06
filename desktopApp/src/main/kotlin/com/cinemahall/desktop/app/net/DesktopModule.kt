@@ -139,35 +139,58 @@ class DesktopModule(
     @Volatile
     private var currentLink: DesktopPeerLink? = null
 
+    /**
+     * **唯一的**链路装配点：界面先摸（[link]）与协调者来要（[createLink]）都必须走这里。
+     *
+     * ── 为什么这条注释值得留着 ──────────────────────────────────────────────────
+     * 2026-11-06 真机第二次报「本机没有接入音频采集」：`0.1.2` 只在 `createLink` 的
+     * `else` 分支里补了 `uplink`，而 [link] 的空值分支仍旧是
+     * `DesktopPeerLink(rtcBackend, linkDispatcher)`（`uplink` 默认 null）。界面一打开
+     * 影厅页就读 `module.link`（`CinemaScreen` 订阅 `link.state`），于是造出的那条
+     * **空壳链路**先被记成 `pendingLink`，协调者随后认领的正是它 ⇒ 房间里的链路天生
+     * 没有音频上行，点开麦克风只能落到「没有接入音频采集」那一支，收发永远是 `-`。
+     *
+     * `0.1.2` 的语音门禁之所以通过，是因为 `--rtc-call-test` 是**直接**
+     * `DesktopPeerLink(..., uplink = …)` 构造的，绕过了这两条入口 —— 门禁测到了
+     * 「链路能用麦克风」，没测到「产品路径把麦克风接上去」。所以现在两份构造收敛成
+     * 一个函数，并由 `DesktopModuleAudioUplinkTest` 钉住「界面先摸的那条也带上行」。
+     *
+     * 为什么**每条链路**一份上行：`DesktopPeerLink` 是一条 PeerConnection 的 owner，
+     * 采集到的 PCM 要各自 `pushCapturePcm` 进自己的 backend。房间级共享采集
+     * （一份采集挂 N-1 个 sender）是后续 `RoomAudioSession` 的事；在那之前三人房里
+     * 会有 2 个 helper 子进程，这是已知代价（每人一份系统麦克风会话）。
+     */
+    private fun newLink(): DesktopPeerLink =
+        DesktopPeerLink(
+            rtcBackend,
+            linkDispatcher,
+            uplink = ProcessAudioHelper(Command.audioHelper()),
+            // AEC 是**原生 APM**，而这条装配现在可能发生在「界面第一次摸链路」的时候 ——
+            // 那一刻 native 未必已经加载（`WebRtcEngine.acquire()` 还没跑）。起不来就退回
+            // 「无 AEC」：麦克风照用、只是没有回声消除，绝不因为它的初始化把页面打死。
+            aec = runCatching { AecChain() }
+                .onFailure {
+                    Log.warn("[rtc] AEC 初始化失败，本条链路无回声消除：${it.javaClass.simpleName}: ${it.message}")
+                }
+                .getOrNull(),
+        ).also { currentLink = it }
+
     val link: DesktopPeerLink
         get() = currentLink ?: synchronized(linkLock) {
-            currentLink ?: DesktopPeerLink(rtcBackend, linkDispatcher).also {
-                pendingLink = it
-                currentLink = it
-            }
+            // 先摸到的那条会被记成 `pendingLink`，由 `createLink` 认领 —— 这样界面盯着的
+            // 与协调者建链的必须是**同一个对象**（见类注释里「为什么要认领」那一段）。
+            currentLink ?: newLink().also { pendingLink = it }
         }
 
     private fun createLink(): DesktopPeerLink = synchronized(linkLock) {
         val claimed = pendingLink
         if (claimed != null) {
             pendingLink = null
+            // 认领之后 `currentLink` 必须指回它：界面读的是 `currentLink`，指错就又成了两个对象。
+            currentLink = claimed
             claimed
         } else {
-            // ⚠️ 语音上行必须在这里接：`uplink` 的默认值是 null，而空值会让
-            // `setCallEnabled(true)` 直接落到「本机没有接入音频采集」那一支 ——
-            // 真机症状是「点了开启麦克风，红字不动、收发永远是 `-`」，
-            // 看起来像麦克风坏了，其实是这条装配从来没接上（2026-11-06 用户报）。
-            //
-            // 为什么**每条链路**一份：`DesktopPeerLink` 是一条 PeerConnection 的 owner，
-            // 采集到的 PCM 要各自 `pushCapturePcm` 进自己的 backend。房间级共享采集
-            // （一份采集挂 N-1 个 sender）是后续 `RoomAudioSession` 的事；在那之前
-            // 三人房里会有 2 个 helper 子进程，这是已知代价（每人一份系统麦克风会话）。
-            DesktopPeerLink(
-                rtcBackend,
-                linkDispatcher,
-                uplink = ProcessAudioHelper(Command.audioHelper()),
-                aec = AecChain(),
-            ).also { currentLink = it }
+            newLink()
         }
     }
 
