@@ -108,7 +108,7 @@ fun runRtcCallTest(role: String, port: Int, seconds: Int, tone: Boolean = false)
                         "received=${audio.audioPacketsReceived ?: "-"} sending=${audio.sending} " +
                         "receiving=${audio.receiving} requested=${audio.requested} " +
                         "pid=${(uplink as? ProcessAudioHelper)?.pid ?: -1} " +
-                        "error=${audio.error ?: "-"} | ${backend.audioDebug()}",
+                        "error=${audio.error ?: "-"} | ${backend.audioDebug()} | ${backend.audioSinkDebug()}",
                 )
                 delay(2_000)
             }

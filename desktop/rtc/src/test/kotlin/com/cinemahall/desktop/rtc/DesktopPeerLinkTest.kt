@@ -394,6 +394,8 @@ private class FakeBackend : RtcBackend {
 
     override fun audioRtp(): com.cinemahall.core.rtc.AudioRtpCounters? = null
 
+    override fun downlinkReadout(): DownlinkReadout = DownlinkReadout()
+
     override fun setAudioSending(enabled: Boolean): Boolean {
         calls += "audioSending($enabled)"
         return true

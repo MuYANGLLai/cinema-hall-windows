@@ -34,6 +34,7 @@ import dev.onvoid.webrtc.RTCRtpTransceiver
 import dev.onvoid.webrtc.RTCRtpTransceiverDirection
 import dev.onvoid.webrtc.RTCRtpTransceiverInit
 import dev.onvoid.webrtc.SetSessionDescriptionObserver
+import dev.onvoid.webrtc.media.MediaStreamTrack
 import dev.onvoid.webrtc.media.audio.AudioTrack
 import dev.onvoid.webrtc.media.audio.AudioTrackSink
 import dev.onvoid.webrtc.media.audio.CustomAudioSource
@@ -419,6 +420,9 @@ class WebRtcBackend : RtcBackend {
 
     override fun audioRtp(): AudioRtpCounters? = LinkStatsParser.parseAudioRtp(lastEntries)
 
+    override fun downlinkReadout(): DownlinkReadout =
+        DownlinkReadout(playedFrames = downlink?.playedFrames ?: 0, writeFails = downlinkWriteFails)
+
     override fun setAudioSending(enabled: Boolean): Boolean {
         val transceiver = audioTransceiver
         if (transceiver == null) {
@@ -498,31 +502,33 @@ class WebRtcBackend : RtcBackend {
     }
 
     /**
-     * 把下行 sink 挂到远端音轨上（幂等）。
+     * 把下行 sink 挂到远端音轨上。
      *
-     * 两个入口都要调：[onTrack]（libwebrtc 只在**第一次**收到该收发端的轨道时通知）
-     * 和 [setRemoteDescription] 成功之后。只靠前者会漏掉一种情况 —— 对端一直没开麦，
-     * 等到开麦时 `onTrack` 早已过去，而那时我们已经不再重新设远端描述了。
+     * [authoritative] = 这条轨道是 [onTrack] 刚交上来的那个（libwebrtc 只在**第一次**拿到
+     * 该收发端的远端轨道时通知一次）。它必须能**顶掉**之前的绑定 —— 两个方向的历史缺陷
+     * 都出在这里，症状恰好相反：
+     *
+     *   ① **2026-11-06「两端都听不到对方」**（本机双端复现）：answer 方在
+     *      `setRemoteDescription` 成功时就先绑了一次，那时 `receiver.track` 还是个
+     *      **占位壳**；随后 `onTrack` 带着真轨道到达，却被 `remoteSink != null` 早退挡掉
+     *      ⇒ 实测「收到 125 个音频包、`sink=[-]`、`play=0`」，一个包都没进设备。
+     *   ② 反过来（每次调用都重挂）会让 `onData` 被回调两次、下行数据量翻倍
+     *      （实测 170 帧/秒 vs 设备 100 帧/秒，队列丢 41%，听感持续断续）。
+     *
+     * 所以：非权威入口只在「还没挂过」时绑；权威入口永远先摘后挂。
      */
-    private fun ensureRemoteAudioSink() {
-        // ⚠️ 必须整段串行：`onTrack` 和 `setRemoteDescription` 的成功回调**在不同线程**
-        // 上，两处都会走到这里。不加锁时两边都看到 `remoteSink == null`，各挂一个 sink
-        // ⇒ `onData` 被回调两次、送进下行的数据量翻倍（实测 170 帧/秒 vs 设备 100 帧/秒，
-        // 队列丢 41%，听感是持续断续）。
+    private fun bindRemoteAudioSink(candidate: MediaStreamTrack?, authoritative: Boolean) {
+        // ⚠️ 必须整段串行：`onTrack` 和 `setRemoteDescription` 的成功回调**在不同线程**上，
+        // 两处都会走到这里。不加锁时两边都看到 `remoteSink == null`，各挂一个 sink。
         synchronized(sinkLock) {
             val pc = pc ?: return
             val device = downlink ?: return
-            val track = runCatching {
-                pc.transceivers.orEmpty().asSequence()
-                    .mapNotNull { it?.receiver?.track }
-                    .filterIsInstance<AudioTrack>()
-                    .firstOrNull()
-            }.getOrNull() ?: return
-            // ⚠️ 判据用「已经挂过没有」，**不能**比较 `track` 的对象身份：
-            // `receiver.track` 每次读都返回一个**新的** Java 包装对象（`NativeObject`），
-            // `===` 永远为 false ⇒ 每调一次就再挂一个 sink。
-            // 一条链路上只有一个远端音轨；链路重建走 `close()`，那里会把这里清空。
-            if (remoteSink != null) return
+            val track = (candidate ?: pickRemoteAudioTrack(pc)) as? AudioTrack ?: return
+            if (remoteSink != null) {
+                if (!authoritative) return
+                // 权威入口：之前那条是占位壳（或被换掉的旧轨道），先摘掉再挂。
+                detachRemoteAudioSink()
+            }
 
             // ⚠️ `onData` 在 **libwebrtc 的音频线程**上：这里只入队，绝不碰设备。
             val sink = AudioTrackSink { data, bitsPerSample, sampleRate, channels, numberOfFrames ->
@@ -553,11 +559,22 @@ class WebRtcBackend : RtcBackend {
                     sinkAttachCount++
                     device.onRender = renderSink
                     device.setVolume(remoteVolume)
-                    audioNote = "remote-sink ok"
+                    audioNote = if (authoritative) "remote-sink ok(onTrack)" else "remote-sink ok"
                 }
                 .onFailure { audioNote = "remote-sink 失败：${it.message}" }
         }
     }
+
+    /** 从收发端列表里挑一条远端音频轨（非权威入口用；权威入口直接用 `onTrack` 交上来的那条）。 */
+    private fun pickRemoteAudioTrack(pc: RTCPeerConnection): AudioTrack? = runCatching {
+        pc.transceivers.orEmpty().asSequence()
+            .mapNotNull { it?.receiver?.track }
+            .filterIsInstance<AudioTrack>()
+            .firstOrNull()
+    }.getOrNull()
+
+    /** 兼容既有两个非权威入口（`onTrack` 之外）。 */
+    private fun ensureRemoteAudioSink() = bindRemoteAudioSink(candidate = null, authoritative = false)
 
     private fun detachRemoteAudioSink() {
         synchronized(sinkLock) {
@@ -596,6 +613,36 @@ class WebRtcBackend : RtcBackend {
             "play=${device?.playedFrames ?: 0} dropped=${device?.droppedFrames ?: 0} " +
             "writeFail=$downlinkWriteFails peak=$renderPeak loud=$renderLoudFrames " +
             "gap=$gap attach=$sinkAttachCount sink=[$sinkFormat] note=[$audioNote]"
+    }
+
+    /**
+     * 门禁/诊断：把「下行 sink 到底挂在哪个音轨上」摊开。
+     *
+     * 每个收发端一段 `方向/种类/id 前 6 位/是不是本机那条`。2026-11-06 真机上
+     * 「两端都听不到对方」时，靠这两组数分清两种成因：
+     *   ① 挂在**本机**音轨上（`LOCAL`）⇒ 自己播自己，对端一帧都收不到；
+     *   ② 一条都没挂上（`sinkdbg=[]` / `bound=-`）⇒ 下行一帧都不会回调。
+     */
+    fun audioSinkDebug(): String {
+        val pc = pc ?: return "sinkdbg=no-pc"
+        val localId = runCatching { audioTrack?.id }.getOrNull()
+        val boundId = runCatching { remoteTrack?.id }.getOrNull()
+        val parts = runCatching {
+            pc.transceivers.orEmpty().map { transceiver ->
+                val track = transceiver?.receiver?.track
+                val kind = runCatching { track?.kind }.getOrNull() ?: "-"
+                val id = runCatching { track?.id }.getOrNull()
+                val dir = runCatching { transceiver?.direction?.name }.getOrNull() ?: "-"
+                val mark = when {
+                    id == null -> "none"
+                    localId != null && id == localId -> "LOCAL"
+                    else -> "remote"
+                }
+                "$dir/$kind/${id?.take(6) ?: "-"}/$mark"
+            }
+        }.getOrElse { listOf("err=${it.message}") }
+        return "sinkdbg=[${parts.joinToString(" ")}] bound=${boundId?.take(6) ?: "-"} " +
+            "local=${localId?.take(6) ?: "-"}"
     }
 
     override fun addIceCandidate(candidate: String, sdpMid: String?, sdpMLineIndex: Int): Boolean {
@@ -743,7 +790,11 @@ class WebRtcBackend : RtcBackend {
         override fun onTrack(transceiver: RTCRtpTransceiver?) {
             // libwebrtc 只在**第一次**拿到该收发端的远端轨道时通知一次。
             // 对端后开麦的情况靠 setRemoteDescription 那条路兜住，两处都调才是幂等完整的。
-            ensureRemoteAudioSink()
+            //
+            // ⚠️ 这里必须是**权威**入口：`transceiver.receiver.track` 是刚刚到达的真轨道，
+            // 而更早那次（`setRemoteDescription` 成功时）拿到的往往只是占位壳。2026-11-06
+            // 真机「两端都听不到」就是被壳顶住了真轨道（见 [bindRemoteAudioSink]）。
+            bindRemoteAudioSink(transceiver?.receiver?.track, authoritative = true)
         }
     }
 

@@ -20,7 +20,7 @@ kotlin {
  * 就出现了「zip 叫 0.1.1、包里是 0.1.2」的包：只有版本号变了而名字没变，
  * 发出去没人能一眼看出是哪一版。现在两处都读它，改名只改这一行。
  */
-val winVersion = "0.1.3"
+val winVersion = "0.1.4"
 
 dependencies {
     implementation(project(":desktop:media"))

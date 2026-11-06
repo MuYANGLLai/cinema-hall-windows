@@ -258,13 +258,29 @@ class DesktopPeerLink(
         _stats.value = backend.snapshotStats()
         // 音量的「真值」在统计里：包计数为 0 时界面才能说「一个包都还没到」。
         backend.audioRtp()?.let { counters ->
-            _callAudio.update {
-                it.copy(
+            val readout = runCatching { backend.downlinkReadout() }.getOrNull()
+            _callAudio.update { current ->
+                val received = (counters.packetsReceived ?: 0) > 0
+                // 「收得到、放不出来」必须与「一个包都没收到」分成两句话：前者查扬声器 /
+                // 输出设备，后者查协商与对端。2026-11-06 真机上这两件事被同一句盖住了。
+                val nextError = when {
+                    received && readout != null && readout.playedFrames == 0L ->
+                        if (readout.writeFails > 0) {
+                            "能收到对端语音，但写不进扬声器（${readout.writeFails} 次失败，查输出设备）"
+                        } else {
+                            "能收到对端语音，正在等播放设备"
+                        }
+                    // 只清我们自己写的那一句；采集/设备的报错不能在这一层被抹掉。
+                    current.error?.startsWith("能收到对端语音") == true -> null
+                    else -> current.error
+                }
+                current.copy(
                     audioPacketsSent = counters.packetsSent,
                     audioPacketsReceived = counters.packetsReceived,
                     // 「在收」的判据是**对端真的在发音频包**，不是本机放出了声。
                     // 这两件事要分得开：放不出声是扬声器的问题，界面该说的是另一句。
-                    receiving = (counters.packetsReceived ?: 0) > 0,
+                    receiving = received,
+                    error = nextError,
                 )
             }
         }

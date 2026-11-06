@@ -122,6 +122,15 @@ interface RtcBackend {
     fun audioRtp(): AudioRtpCounters?
 
     /**
+     * 下行播放的即时读数。
+     *
+     * 存在的理由只有一条：把「一个包都没收到」与「收到了但放不出声」分开。这两种成因的
+     * 修法完全不同（前者查协商/网络，后者查扬声器与输出设备），而 2026-11-06 真机上
+     * 界面只有一句「还没收到对端语音」，两种都被它盖住了。
+     */
+    fun downlinkReadout(): DownlinkReadout
+
+    /**
      * 挂上 / 摘下本机音轨（`replaceTrack`）。
      *
      * 为什么要摘而不是「推静音」：音轨挂着但没人 push PCM 时，`CustomAudioSource`
@@ -164,6 +173,17 @@ interface RtcBackend {
 
     fun close()
 }
+
+/**
+ * 下行（对端语音）播放的读数，[RtcBackend.downlinkReadout] 的返回值。
+ *
+ * [playedFrames] = 真正写进设备的帧数（10 ms 一帧）；[writeFails] = 写设备失败的次数。
+ * 两者都为 0 且已经收到包 ⇒ 「收得到、放不出来」，问题在本机输出设备，不在链路。
+ */
+data class DownlinkReadout(
+    val playedFrames: Long = 0,
+    val writeFails: Long = 0,
+)
 
 /**
  * `DesktopPeerLink` 的执行器：**单线程 + FIFO**。

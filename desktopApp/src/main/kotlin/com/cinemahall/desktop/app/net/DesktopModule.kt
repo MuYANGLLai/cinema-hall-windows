@@ -112,8 +112,6 @@ class DesktopModule(
         authToken = authToken,
     )
 
-    private val rtcBackend = WebRtcBackend()
-
     private val linkDispatcher = SingleThreadDispatcher("desktop-rtc")
 
     /**
@@ -159,10 +157,18 @@ class DesktopModule(
      * 采集到的 PCM 要各自 `pushCapturePcm` 进自己的 backend。房间级共享采集
      * （一份采集挂 N-1 个 sender）是后续 `RoomAudioSession` 的事；在那之前三人房里
      * 会有 2 个 helper 子进程，这是已知代价（每人一份系统麦克风会话）。
+     *
+     * ⚠️ **backend 也必须每条链路一份**（2026-11-06 真机「安卓之间正常、和 Windows 两边都没声」）：
+     * `WebRtcBackend` 的 `pc` / `audioTrack` / `audioTransceiver` / `downlink` / 下行 sink
+     * 全是**单实例状态**。共用一份时，第二个成员 `start()` 就会把这些字段覆盖成新的那条，
+     * 于是前一条的音频找不到自己的设备与轨道 —— 四人房（桌面 3 条链路）里音频全乱，
+     * 而 1:1 房永远看不出问题（只有一条链路）。原生 `PeerConnectionFactory` 仍是进程级
+     * 单例（`WebRtcEngine.acquire()`），所以多份 backend 不额外建工厂；`WebRtcBackend.close()`
+     * 只释放自己的轨道与设备，不碰工厂。
      */
     private fun newLink(): DesktopPeerLink =
         DesktopPeerLink(
-            rtcBackend,
+            WebRtcBackend(),
             linkDispatcher,
             uplink = ProcessAudioHelper(Command.audioHelper()),
             // AEC 是**原生 APM**，而这条装配现在可能发生在「界面第一次摸链路」的时候 ——
@@ -207,6 +213,16 @@ class DesktopModule(
 
     /** 信令状态日志的订阅；只建一次（重复 `connect()` 不该叠加）。 */
     private var stateLogJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * 收发计数 / 链路统计的采样循环；同样只建一次。
+     *
+     * 没有它，面板上的 `本机发送 / 收到` 会**永远是 `-`**：`DesktopPeerLink` 的包计数来自
+     * `getStats` 快照（`backend.audioRtp()`），而桌面这一侧没有任何东西会自己去 `getStats`
+     * —— Android 至少还有 ⑦ 面板上的「刷新统计」按钮，桌面连那个按钮都没有。
+     * 2026-11-06 真机就是「红字消失了、按钮显示 `关闭麦克风`，两个数还是 `-`」。
+     */
+    private var statsJob: kotlinx.coroutines.Job? = null
 
     /**
      * 建协调者并把它接到玩法上。**可以重复调用**（界面重建、换账号），已存在时直接返回。
@@ -272,6 +288,16 @@ class DesktopModule(
                 signaler.state.collect { state -> Log.info("[signal] state=$state endpoint=$endpoint") }
             }
         }
+        // 统计采样：每秒一次，让面板的 `本机发送 / 收到` 有数可读（见 [STATS_POLL_MS]）。
+        // 房间为空时 `refreshStats()` 是个空循环，不必额外判条件。
+        if (statsJob == null) {
+            statsJob = scope.launch {
+                while (true) {
+                    delay(STATS_POLL_MS)
+                    runCatching { coordinator?.refreshStats() }
+                }
+            }
+        }
         scope.launch {
             runCatching { signaler.connect(endpoint, myUserId) }
                 .onFailure { Log.warn("[signal] 连接 $endpoint 失败：${it.message}") }
@@ -317,6 +343,8 @@ class DesktopModule(
     fun close() {
         runCatching { rtcLogJob?.cancel() }
         runCatching { stateLogJob?.cancel() }
+        runCatching { statsJob?.cancel() }
+        statsJob = null
         stateLogJob = null
         val created = coordinator
         coordinator = null
@@ -344,6 +372,14 @@ class DesktopModule(
     }
 
     companion object {
+
+        /**
+         * 统计采样周期（毫秒）。
+         *
+         * 1 秒是「面板上的数看起来在动」与「别为一次 getStats 长期占 cpu」之间的折中：
+         * 语音一包 20 ms，1 秒的粒度足够让人看出「在发 / 在收」，也不至于抖动。
+         */
+        private const val STATS_POLL_MS = 1_000L
 
         /**
          * 本机身份（桌面没有账号系统）。
