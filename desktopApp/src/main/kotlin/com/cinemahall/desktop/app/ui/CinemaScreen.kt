@@ -59,6 +59,7 @@ import com.cinemahall.desktop.app.media.DesktopFileSource
 import com.cinemahall.desktop.app.net.DesktopModule
 import com.cinemahall.desktop.library.DesktopMovie
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.swing.Swing
 import kotlinx.coroutines.withContext
@@ -102,6 +103,10 @@ fun CinemaScreen(
     autoplay: Boolean,
     onVolumeChange: (Float) -> Unit,
     onOpenFile: () -> Unit,
+    /** 影片库里的片（影厅页的「从影片库选片源」用；空列表 = 还没扫过库）。 */
+    movies: List<DesktopMovie> = emptyList(),
+    /** 在影厅页选片：只换片源，**留在影厅页**、不自动起播。 */
+    onSelectMovie: (DesktopMovie) -> Unit = {},
 ) {
     val colors = LocalCinemaColors.current
 
@@ -152,6 +157,8 @@ fun CinemaScreen(
                 autoplay = autoplay,
                 onVolumeChange = onVolumeChange,
                 onOpenFile = onOpenFile,
+                movies = movies,
+                onSelectMovie = onSelectMovie,
             )
         }
     }
@@ -431,6 +438,8 @@ private fun HallPanel(
     autoplay: Boolean,
     onVolumeChange: (Float) -> Unit,
     onOpenFile: () -> Unit,
+    movies: List<DesktopMovie> = emptyList(),
+    onSelectMovie: (DesktopMovie) -> Unit = {},
 ) {
     val colors = LocalCinemaColors.current
     val callAudio by module.handler.callAudio.collectAsState()
@@ -440,6 +449,66 @@ private fun HallPanel(
 
     val isHost = room.hostUserId == module.myUserId
     val listening = !isHost && mediaCheck.verdict is MediaCheck.Mismatch
+
+    // ── 同步引擎必须拿到播放器 ────────────────────────────────────────────────
+    // `attachPlayback` 是幂等的（同一个播放器只建一个引擎），它同时补设角色与已知的片源摘要。
+    // ⚠️ 少了这一步，桌面端**根本没有同步引擎的播放器**：房主按播放不会广播，成员收不到
+    // 位置/播放态，`片源 未上报` 旁边那些同步面板全是空的。2026-11-06 真机报
+    // 「只校验了哈希、播放完全不同步」就是这条线没接（全仓只有定义、零调用点）。
+    var syncEngine by remember { mutableStateOf<com.cinemahall.core.session.CinemaSyncEngine?>(null) }
+    LaunchedEffect(module, controller.target) {
+        val player = controller.target ?: return@LaunchedEffect
+        syncEngine = withContext(Dispatchers.Swing) { module.attachPlayback(player) }
+        Log.info("[cinema] 同步引擎已挂上播放器（角色随 room 更新补设）")
+    }
+
+    // 界面动作 → 引擎。约定是「先动播放器、再调引擎」，所以这几个回调只负责通报。
+    val hooks = remember(syncEngine) {
+        val engine = syncEngine
+        LocalPlaybackHooks(
+            onPlay = { engine?.onLocalPlay(it) },
+            onPause = { engine?.onLocalPause(it) },
+            onSeek = { engine?.onLocalSeek(it) },
+            onSpeed = { engine?.onLocalSpeed(it) },
+        )
+    }
+
+    // 影厅页选片：不离开本页、不自动起播（起播由用户按播放键决定）。
+    var picking by remember { mutableStateOf(false) }
+    // 同步读数：引擎还没建好时给一份默认快照（`canControl=true`，等价于「单机」）。
+    val syncStatus by (syncEngine?.status ?: EMPTY_SYNC_STATUS).collectAsState()
+    // 只在**有意义的变化**时留痕（角色 / 链路 / 是否锚定），不跟着 500ms 的漂移刷日志。
+    // 「是不是根本没同步」这类问题，一行 anchored=false 比让用户描述现象可靠得多。
+    LaunchedEffect(syncStatus.linkUp, syncStatus.isAnchored, syncStatus.roleText) {
+        Log.info(
+            "[sync] role=${syncStatus.roleText} linkUp=${syncStatus.linkUp} " +
+                "anchored=${syncStatus.isAnchored} drift=${syncStatus.driftMs}ms tier=${syncStatus.tier}",
+        )
+    }
+    // 引擎的每条 `lastEvent` 都要进日志。
+    //
+    // 它原先只出现在界面上（诊断页那一行），桌面上没有 logcat —— 于是「对端发来的控制
+    // 被忽略了」「心跳到了但没锚定」这类判断只有人坐在窗口前才看得见。2026-11-06 排查
+    // 「从端收到了心跳却不锚定」时就卡在这里：日志里有「收到 heartbeat」，引擎里发生过
+    // 什么却一个字都没有。
+    LaunchedEffect(syncStatus.lastEvent) {
+        val line = syncStatus.lastEvent
+        if (line.isNotBlank()) Log.info("[sync] evt=$line")
+    }
+    // 每 5 秒一行位置读数：`local` 与 `target` 是不是一起走，一眼就能看出来。
+    // 500ms 的 tick 不刷日志（那会把 app.log 冲掉），5 秒足够定位「到底动没动」。
+    LaunchedEffect(syncEngine) {
+        val engine = syncEngine ?: return@LaunchedEffect
+        while (true) {
+            delay(5_000)
+            val s = engine.status.value
+            Log.info(
+                "[sync] t=5s role=${s.roleText} anchored=${s.isAnchored} " +
+                    "local=${s.localPositionMs} target=${s.targetPositionMs} drift=${s.driftMs}ms " +
+                    "tier=${s.tier} rtt=${s.rttMs}",
+            )
+        }
+    }
 
     // 本机片源摘要：进房、换片、模块就绪都会重跑一次。
     // 判据放在 `movie.path` 上而不是「点了选片按钮」上 —— 从影片库挑片进来的路径
@@ -458,24 +527,48 @@ private fun HallPanel(
 
     Row(Modifier.fillMaxSize()) {
         Column(Modifier.weight(1f).fillMaxHeight()) {
-            SourceBanner(
-                isHost = isHost,
-                check = mediaCheck,
-                onOpenFile = onOpenFile,
-            )
-            PlayerPane(
-                controller = controller,
-                movie = movie,
-                volume = volume,
-                autoplay = autoplay,
-                onVolumeChange = onVolumeChange,
-                onOpenFile = onOpenFile,
-                modifier = Modifier.weight(1f),
-                // 旁听者**不许本地自己播**（《多人房间改造方案》§6 的硬规则）：
-                // 边听语音边看自己那份不同的片源，比停播更糟 —— 两人看到的时间轴对不上，
-                // 却都以为自己看的是同一场。
-                interactive = !listening,
-            )
+            if (picking) {
+                SourcePicker(
+                    movies = movies,
+                    currentPath = movie?.path,
+                    onPick = {
+                        picking = false
+                        onSelectMovie(it)
+                    },
+                    onCancel = { picking = false },
+                    onOpenFile = onOpenFile,
+                )
+            } else {
+                SourceBanner(
+                    isHost = isHost,
+                    check = mediaCheck,
+                    onOpenFile = onOpenFile,
+                    onPickFromLibrary = { picking = true },
+                )
+                if (!isHost) {
+                    Text(
+                        "播放由房主控制：本机的播放键、±10s、进度条与倍速已锁；换片、音量、字幕不受限。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.ink3,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
+                }
+                PlayerPane(
+                    controller = controller,
+                    movie = movie,
+                    volume = volume,
+                    autoplay = autoplay,
+                    onVolumeChange = onVolumeChange,
+                    onOpenFile = onOpenFile,
+                    hooks = hooks,
+                    modifier = Modifier.weight(1f),
+                    // 控制权取自同步引擎的 `canControl`（契约 §7 的唯一真值：房主恒真、
+                    // 成员按策略表且「在看」）。它同时管播放键、±10s、进度条与倍速；
+                    // 音量/字幕不在此列。2026-11-06 用户报「房员能自己拖进度条」就是这里
+                    // 原先只判了「片源不一致」，没判控制权。
+                    interactive = syncStatus.canControl && !listening,
+                )
+            }
         }
 
         Column(
@@ -548,10 +641,22 @@ private fun HallPanel(
             StatusLine("链路", peerStateText(linkState), if (linkState is PeerState.Failed) colors.danger else colors.ink2)
             StatusLine(
                 "控制权",
-                if (isHost) "房主 · 可控制" else "成员 · 受控",
-                if (isHost) colors.accent else colors.ink2,
+                when {
+                    isHost -> "房主 · 可控制"
+                    syncStatus.canControl -> "成员 · 可控制"
+                    else -> "成员 · 受控"
+                },
+                if (isHost || syncStatus.canControl) colors.accent else colors.ink2,
             )
             StatusLine("片源", sourceStatusText(mediaCheck, isHost), colors.ink2)
+            // 播放同步的三行：房主/成员、锚定状态、偏差。有了它们，「到底同没同步」
+            // 才能在界面上直接读出来，而不是靠听/看猜（2026-11-06 用户报「只校验了哈希」）。
+            StatusLine("同步", syncStatusText(syncStatus), if (syncStatus.linkUp) colors.ink2 else colors.ink3)
+            StatusLine(
+                "偏差",
+                if (syncStatus.isAnchored) "${syncStatus.driftMs} ms · ${syncStatus.tier}" else "-",
+                colors.ink2,
+            )
             TextButton(onClick = { module.leaveRoom() }) { Text("离开房间") }
         }
     }
@@ -622,7 +727,12 @@ private fun Badge(text: String, color: Color) {
  * 成员要知道「不是你的播放器坏了，是片源不同」，还没上报的人要知道「再等等」。
  */
 @Composable
-private fun SourceBanner(isHost: Boolean, check: CinemaMediaCheck, onOpenFile: () -> Unit) {
+private fun SourceBanner(
+    isHost: Boolean,
+    check: CinemaMediaCheck,
+    onOpenFile: () -> Unit,
+    onPickFromLibrary: () -> Unit,
+) {
     val colors = LocalCinemaColors.current
     val verdict = check.verdict
 
@@ -674,6 +784,70 @@ private fun SourceBanner(isHost: Boolean, check: CinemaMediaCheck, onOpenFile: (
         }
         if (verdict is MediaCheck.Mismatch && !isHost) {
             OutlinedButton(onClick = onOpenFile) { Text("换一部片") }
+        }
+        Spacer(Modifier.width(8.dp))
+        // 影厅页选片：不必先跑去影片库再回来（那条路还会把页面踢回播放页）。
+        OutlinedButton(onClick = onPickFromLibrary) { Text("从影片库选片源") }
+    }
+}
+
+/**
+ * 影厅页的选片面板（替代「跳去影片库再回来」那条路）。
+ *
+ * 为什么是整块替换而不是弹窗：`SwingPanel`（AWT heavyweight 画布）之上叠 Compose 控件
+ * **完全不可见**，而 Compose Desktop 的独立 DialogWindow 又拿不到本应用的主题
+ * （`LocalCinemaColors` 不会跨窗口传递）。整块替换是唯一既能看到、又不用重画主题的做法。
+ */
+@Composable
+private fun SourcePicker(
+    movies: List<DesktopMovie>,
+    currentPath: String?,
+    onPick: (DesktopMovie) -> Unit,
+    onCancel: () -> Unit,
+    onOpenFile: () -> Unit,
+) {
+    val colors = LocalCinemaColors.current
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("选择片源", style = MaterialTheme.typography.titleMedium, color = colors.ink)
+            Spacer(Modifier.width(10.dp))
+            Text("${movies.size} 部 · 选中后不会自动播放", style = MaterialTheme.typography.labelSmall, color = colors.ink3)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onOpenFile) { Text("直接打开文件…") }
+            TextButton(onClick = onCancel) { Text("返回影厅") }
+        }
+        Spacer(Modifier.height(8.dp))
+        HorizontalDivider(color = colors.line)
+        if (movies.isEmpty()) {
+            Spacer(Modifier.height(14.dp))
+            Text("影片库还是空的：去「影片库」加一个根目录并扫描，或用上面的「直接打开文件…」。", color = colors.ink3)
+            return@Column
+        }
+        LazyColumn(Modifier.fillMaxSize().padding(top = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            items(movies, key = { it.path }) { movie ->
+                val selected = movie.path == currentPath
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(if (selected) colors.accent.copy(alpha = 0.14f) else colors.surface)
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (selected) "${movie.title}（当前）" else movie.title,
+                            color = if (selected) colors.accent else colors.ink,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(
+                            "${formatDuration(movie.durationMs)} · ${formatBytes(movie.sizeBytes)} · ${movie.path}",
+                            color = colors.ink3,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                    TextButton(onClick = { onPick(movie) }) { Text(if (selected) "重新载入" else "选这部") }
+                }
+            }
         }
     }
 }
@@ -739,6 +913,24 @@ private fun StatusLine(label: String, value: String, color: Color) {
 // ── 文案 ────────────────────────────────────────────────────────────────────
 
 private fun isHostOf(member: Member, room: Room): Boolean = member.userId == room.hostUserId
+
+/** 引擎还没建好时的占位快照（`canControl=true`，与「单机看片」一致）。 */
+private val EMPTY_SYNC_STATUS = kotlinx.coroutines.flow.MutableStateFlow(
+    com.cinemahall.core.session.CinemaSyncStatus(),
+)
+
+/**
+ * 同步状态的一句话。
+ *
+ * 刻意不写成「同步中 / 未同步」这种二值：`isAnchored` 才是「房主已经下发过一次权威时间轴」，
+ * 而 `linkUp` 只管数据面通没通。两者混在一起时，用户看到「已连接」却怎么都不同步，
+ * 会去查网络 —— 实际情况往往是房主还没按播放（没有锚点）。
+ */
+private fun syncStatusText(status: com.cinemahall.core.session.CinemaSyncStatus): String = when {
+    !status.linkUp -> "链路未通 · ${status.roleText}"
+    status.isAnchored -> "已锚定 · ${status.roleText}"
+    else -> "已连 · 等房主起播（还没锚点）"
+}
 
 private fun isRoomCode(value: String): Boolean =
     value.length == 6 && value.all { it in '2'..'9' || (it in 'A'..'Z' && it != 'O' && it != 'I' && it != 'L') }

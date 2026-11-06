@@ -158,12 +158,34 @@ fun main(args: Array<String>) {
         if (cleanedUp) return
         cleanedUp = true
         KeepAwake.disable()
+        // 托盘图标要在**窗口之前**卸：它自己是一个「还有图形资源要看管」的理由，
+        // 留着它，AWT 的自动收尾不会发生（见 `TraySupport.installed` 的注释）。
+        runCatching { TraySupport.uninstall() }
         // 信令模块先收：它内部要停采集、拆 PC、释放进程级 native 工厂。
         // 顺序放在播放器之前 —— 链路里还挂着播放相关的回调，先断链路再关播放器。
         runCatching { cinema.close() }
         runCatching { controller.close() }
         runCatching { instance.close() }
         Log.info("退出")
+    }
+
+    /**
+     * 关窗之后**兜底**把进程结束掉。
+     *
+     * `exitApplication()` 只是让组合停下来，它**不保证 JVM 退出**：只要有非守护线程
+     * 还活着（WebRTC 的原生回调线程、AWT 的 EDT），进程就会一直挂着。用户看到的是
+     * 「窗口关了，任务管理器里还有一个 cinema-hall」，再双击则提示「另一个实例已在运行」
+     * —— 而那个实例的窗口根本不存在。2026-11-06 真机实测撞到过两次。
+     *
+     * 5 秒足够 `cleanup()` 把 native 资源收干净；真收不干净时也要退，
+     * 否则用户只能去任务管理器杀进程。
+     */
+    fun forceExitWatchdog() {
+        Thread({
+            runCatching { Thread.sleep(5_000) }
+            Log.warn("退出超时：窗口已关但 JVM 没退（非守护线程还在）→ 强制结束进程")
+            Runtime.getRuntime().halt(0)
+        }, "exit-watchdog").apply { isDaemon = true }.start()
     }
 
     Runtime.getRuntime().addShutdownHook(Thread { cleanup() })
@@ -221,6 +243,7 @@ fun main(args: Array<String>) {
             onCloseRequest = {
                 cleanup()
                 exitApplication()
+                forceExitWatchdog()
             },
             title = "cinema-hall · Windows",
             state = windowState,
@@ -268,8 +291,12 @@ fun main(args: Array<String>) {
                     onExit = {
                         cleanup()
                         exitApplication()
+                        forceExitWatchdog()
                     },
                     initialMovie = initialMovie,
+                    // `--no-autoplay` 必须真的生效：它是「从端是不是被引擎拉起来的」这类
+                    // 验证的前提，写死 true 会让那些验证全都变成假阳性。
+                    initialAutoplay = options.autoplay,
                     cinema = cinema,
                     account = account,
                     initialScreen = screenOf(options.initialScreen),
@@ -310,6 +337,7 @@ fun main(args: Array<String>) {
                 )
                 cleanup()
                 exitApplication()
+                forceExitWatchdog()
             }
         }
 
@@ -320,6 +348,7 @@ fun main(args: Array<String>) {
                 onExit = {
                     cleanup()
                     exitApplication()
+                    forceExitWatchdog()
                 },
             )
         }
@@ -459,7 +488,20 @@ private data class StartupOptions(
  */
 private object TraySupport {
 
+    /**
+     * 装上去的那个图标。**必须留着引用**，否则 [uninstall] 无从下手。
+     *
+     * ── 为什么一定要卸（2026-11-06 实测）────────────────────────────────────────
+     * AWT 的自动收尾（「最后一个窗口关掉就结束 EDT」）在**装了托盘图标**时不成立：
+     * 托盘本身算一个「还有图形资源要看管」的理由。于是窗口关了、`exitApplication()`
+     * 也调了，JVM 却一直活着 —— 进程还在，`app-<profile>.lock` 还占着，
+     * 用户再双击就得到「另一个实例已在运行」，而任务管理器里那个进程看起来
+     * 就是个幽灵。真机上这一条正是「到点退出/关窗之后进程不退」的成因。
+     */
+    private var installed: java.awt.TrayIcon? = null
+
     fun install(onShow: () -> Unit, onExit: () -> Unit) {
+        if (installed != null) return
         if (!java.awt.SystemTray.isSupported()) {
             Log.warn("本机不支持系统托盘，跳过")
             return
@@ -484,7 +526,16 @@ private object TraySupport {
             val icon = java.awt.TrayIcon(image, "cinema-hall", popup)
             icon.addActionListener { onShow() }
             tray.add(icon)
+            installed = icon
             Log.info("托盘图标已安装")
         }.onFailure { Log.warn("托盘安装失败：${it.message}") }
+    }
+
+    /** 退出前卸掉托盘图标，让 AWT 能自己收尾（见 [installed] 的注释）。幂等。 */
+    fun uninstall() {
+        val icon = installed ?: return
+        installed = null
+        runCatching { java.awt.SystemTray.getSystemTray().remove(icon) }
+            .onFailure { Log.warn("托盘卸载失败：${it.message}") }
     }
 }

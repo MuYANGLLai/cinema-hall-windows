@@ -312,10 +312,38 @@ class CinemaHandler(
             // 两条路都要接上，否则房主在链路刚通时下发的是「没有片源摘要」的空快照。
             _mediaCheck.value.local?.let { created.setMediaSignature(it) }
             engine = created
-            // 角色在引擎出现之前就已经判过了（可能已经在房里），补设一次。
-            created.setRole(isHostLocally)
+            // **整个房间上下文**补一次，不只是角色。
+            //
+            // ── 为什么「只补角色」是错的（2026-11-06 真机：从端收到心跳却不锚定）──────
+            // 引擎是界面在影厅页首次组合时才建的，而房间可能**更早**就到了（自动进房
+            // 跑在页面之外）。那一路上 `applyHost()` 已经跑过一遍，但它调用时 `engine`
+            // 还是 null，什么都灌不进去。等引擎建出来，只补 `setRole` 的话：
+            //   · 角色对了 → 界面显示「从端（跟随）」，看起来一切正常；
+            //   · `hostUserId` 是 null → `mayApply()` 把房主发来的 `cinema.heartbeat`
+            //     与 `cinema.state_snapshot` 全部按「从端只接受房主的控制（房主=未定）」
+            //     丢掉 → 从端永远 `anchored=false`、画面一动不动，**且没有任何报错**。
+            // 这是纯时序竞态：引擎先建就正常，后建就永久失效 —— 于是表现为「有时能同步，
+            // 有时不能」，极易被当成网络问题。
+            pushRoomContext(created)
             return created
         }
+    }
+
+    /**
+     * 把「当前房间里的事实」一次性灌进引擎。
+     *
+     * **唯一装配点**：房间变化（[applyHost]）与引擎晚建（[attachPlayback]）都走它。
+     * 两处各写一份必然漏字段 —— 2026-11-06 漏的正是 `hostUserId`，而它的症状
+     * （从端静默忽略房主的一切）与网络无关，只在引擎晚建时出现。
+     *
+     * 顺序：先角色（它内部会重置同步状态），再上下文，最后策略与「在看」——
+     * 后两者只影响控制权判定，与锚点无关。
+     */
+    private fun pushRoomContext(engine: CinemaSyncEngine) {
+        engine.setRole(isHostLocally)
+        engine.setRoomContext(myUserId, hostUserId, inRoom = lastRoom != null)
+        engine.setControlPolicy(_controlPolicy.value)
+        engine.setSelfWatching(_selfMedia.value?.let { it.matched && it.watching } ?: false)
     }
 
     // ── 1.6：角色判定（房主主控，§6.5）─────────────────────────────────────
@@ -482,20 +510,15 @@ class CinemaHandler(
         isHostLocally = isHost
         hostUserId = room?.hostUserId
         lastRoom = room
-        engine?.setRole(isHost)
-        // 阶段二 P4：把「我在哪 / 谁是房主 / 在不在房间」一次交给引擎 —— 控制权判据（§7）
-        // 要用它们，而引擎自己读不到房间（那是底座的模型，玩法才认识）。
-        // **必须三个一起给**：只给前两个的话引擎分不清「不在房间」与「房主还没解析出来」，
-        // 而这两者的结论正好相反（见 `CinemaSyncEngine.canControlLocally`）。
-        engine?.setRoomContext(mine, room?.hostUserId, inRoom = room != null)
+        // 退房时先把「房主对我的裁决」清掉，再灌上下文 —— 顺序反了的话，
+        // `pushRoomContext` 会把上一场残留的 `matched && watching` 带进新引擎状态。
+        if (room == null) _selfMedia.value = null
+        // **唯一的上下文装配点**，见 [pushRoomContext]。
+        engine?.let(::pushRoomContext)
         // 换了房间 / 退房：逐成员结论与「房主对我的裁决」都不再成立。
         // 不清的话，下一场里新成员会先看到上一场的「已匹配」。
         if (room == null || room.members.none { it.userId != mine }) {
             if (_members.value.isNotEmpty()) _members.value = emptyMap()
-        }
-        if (room == null) {
-            _selfMedia.value = null
-            engine?.setSelfWatching(false)
         }
     }
 

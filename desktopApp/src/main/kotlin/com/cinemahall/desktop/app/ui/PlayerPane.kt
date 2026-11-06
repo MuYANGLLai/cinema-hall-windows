@@ -46,6 +46,21 @@ import kotlinx.coroutines.delay
  * 上**完全不可见**。要叠层只能换独立窗口或自绘 AWT 控件，两者都超出 W1 的范围，
  * 而任务书给的退路就是「放画面下方」。所以这里固定成上下两段。
  */
+/**
+ * 界面动作 → 同步引擎的回调（可选；默认全空 = 单机看片，不需要广播）。
+ *
+ * ⚠️ 调用时机是**先动播放器、再调这里**。`CinemaSyncEngine.onLocalPlay` 的约定就是这样：
+ * 它要先看到「播放器真的播起来了」才广播，否则会出现「本机没播、对端却开始放」。
+ * 2026-11-06 的缺陷正是这条线压根没接：播放键直接调 `target.play()`，引擎一无所知，
+ * 于是房主按播放，成员那台一动不动。
+ */
+class LocalPlaybackHooks(
+    val onPlay: (Long) -> Unit = {},
+    val onPause: (Long) -> Unit = {},
+    val onSeek: (Long) -> Unit = {},
+    val onSpeed: (Float) -> Unit = {},
+)
+
 @Composable
 fun PlayerPane(
     controller: PlayerController,
@@ -55,6 +70,8 @@ fun PlayerPane(
     onVolumeChange: (Float) -> Unit,
     onOpenFile: () -> Unit,
     modifier: Modifier = Modifier,
+    /** 播放/暂停/拖动/倍速之后通知同步引擎；默认空实现（单机看片）。 */
+    hooks: LocalPlaybackHooks = LocalPlaybackHooks(),
     /**
      * false = 本机不该动播放（成员受控 / 片源不一致的旁听）。
      *
@@ -86,13 +103,14 @@ fun PlayerPane(
         onDispose { runCatching { target.detachSurface(surface) } }
     }
 
-    // 选片由外层负责（点影片库/打开文件），这里只负责“有片子就起播”。
+    // 选片由外层负责（点影片库/打开文件），这里只负责「把片子装进播放器」。
+    // 2026-11-06 起**不再自动起播**：装好就停在首帧，等用户按「播放」（房主按下去才会广播）。
     LaunchedEffect(movie?.path, autoplay) {
-        if (movie != null && autoplay) {
+        if (movie != null) {
             controller.open(movie.path, movie.fileName, movie.sizeBytes)
             delay(300)
             target.setVolume(volume)
-            target.play()
+            if (autoplay) target.play()
         }
     }
 
@@ -171,7 +189,9 @@ fun PlayerPane(
                     },
                     onValueChangeFinished = {
                         if (durationMs > 0) {
-                            target.seekTo((dragValue * durationMs).toLong())
+                            val to = (dragValue * durationMs).toLong()
+                            target.seekTo(to)
+                            hooks.onSeek(to)
                         }
                         dragging = false
                     },
@@ -190,21 +210,35 @@ fun PlayerPane(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 OutlinedButton(
-                    onClick = { target.seekTo((positionMs - 10_000).coerceAtLeast(0)) },
+                    onClick = {
+                        val to = (positionMs - 10_000).coerceAtLeast(0)
+                        target.seekTo(to)
+                        hooks.onSeek(to)
+                    },
                     enabled = interactive,
                 ) {
                     Text("−10s")
                 }
                 Button(
                     onClick = {
-                        if (playing) target.pause() else target.play()
+                        if (playing) {
+                            target.pause()
+                            hooks.onPause(target.currentPositionMs)
+                        } else {
+                            target.play()
+                            hooks.onPlay(target.currentPositionMs)
+                        }
                     },
                     enabled = interactive,
                 ) {
                     Text(if (playing) "暂停" else "播放")
                 }
                 OutlinedButton(
-                    onClick = { target.seekTo(positionMs + 10_000) },
+                    onClick = {
+                        val to = positionMs + 10_000
+                        target.seekTo(to)
+                        hooks.onSeek(to)
+                    },
                     enabled = interactive,
                 ) { Text("+10s") }
 
@@ -223,6 +257,7 @@ fun PlayerPane(
                     TextButton(onClick = {
                         speed = candidate
                         target.setSpeed(candidate)
+                        hooks.onSpeed(candidate)
                     }, enabled = interactive) {
                         Text(
                             if (candidate == 1f) "1×" else "${candidate}×",

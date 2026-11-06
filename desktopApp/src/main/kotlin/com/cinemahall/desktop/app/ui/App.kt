@@ -173,6 +173,14 @@ fun AppRoot(
      */
     account: DesktopAccount,
     initialScreen: Screen = Screen.Home,
+    /**
+     * 启动时那部片到底要不要**自动起播**。
+     *
+     * 只有命令行 `--open` 这条门禁路径会关心它（`--no-autoplay` → false）。
+     * 2026-11-06 之前这里是写死 `true` 的：`--open=… --no-autoplay` 照样会播，
+     * 于是「从端是不是被引擎拉起来的」这类验证全变成了假阳性 —— 从端自己就播了。
+     */
+    initialAutoplay: Boolean = true,
     cinemaAuto: CinemaAuto? = null,
     identityOverride: String? = null,
     /** `--signal-endpoint` 的显式覆盖（null = 用 settings / 内置默认）。 */
@@ -220,7 +228,7 @@ fun AppRoot(
     var screen by remember { mutableStateOf(initialScreen) }
     var current by remember { mutableStateOf(initialMovie) }
     var volume by remember { mutableStateOf(settings.volume) }
-    var autoplay by remember { mutableStateOf(true) }
+    var autoplay by remember { mutableStateOf(initialAutoplay) }
     var volumeVersion by remember { mutableStateOf(0) }
 
     val scope = rememberCoroutineScope()
@@ -368,13 +376,28 @@ fun AppRoot(
         onSettingsChange(settings.copy(volume = value))
     }
 
-    fun openFile(movie: DesktopMovie) {
+    /**
+     * 选片并跳到播放页。
+     *
+     * [startPlaying] 默认 **false**：2026-11-06 起「选片」与「起播」分成两件事 ——
+     * 选完只把片子装进播放器、停在首帧，等用户自己按播放（房主按下播放才会广播给成员）。
+     * 只有命令行 `--open` 这类「明确要放」的入口才传 true。
+     */
+    fun openFile(movie: DesktopMovie, startPlaying: Boolean = false) {
         current = movie
         screen = Screen.Home
-        autoplay = true
+        autoplay = startPlaying
         onSettingsChange(settings.copy(lastMoviePath = movie.path))
-        // 真正的 open + play 由 [PlayerPane] 的 LaunchedEffect 做：那里才知道
-        // 画面是否已经挂上，也避免同一部片被“外层 + 播放区”开两次。
+        // 真正的 open 由 [PlayerPane] 的 LaunchedEffect 做：那里才知道画面是否已经挂上，
+        // 也避免同一部片被"外层 + 播放区"开两次。
+    }
+
+    /** 影厅页里选片：**留在影厅页**、不自动起播（片源摘要由影厅页那条 effect 重算）。 */
+    fun selectForHall(movie: DesktopMovie) {
+        current = movie
+        autoplay = false
+        onSettingsChange(settings.copy(lastMoviePath = movie.path))
+        Log.info("[cinema] 影厅页选片：${movie.path}（不自动播放）")
     }
 
     val chooseFile: () -> Unit = {
@@ -391,11 +414,28 @@ fun AppRoot(
         }
     }
 
+    // 键盘快捷键是**全局**的（播放页也生效），所以这里必须自己判一次控制权：
+    // 在房间里且本机不是房主时，方向键拖动会把成员那台拖离房主的时间轴 —— 界面上的
+    // 进度条已经锁了，快捷键是同一件事的另一个入口，不能漏。
+    fun localControlAllowed(): Boolean {
+        val module = cinema.module ?: return true
+        val room = module.signaler.room.value ?: return true
+        return room.hostUserId == module.myUserId
+    }
+
     Shortcuts.onPlayPause = {
-        controller.target?.let { if (it.isPlaying) it.pause() else it.play() }
+        if (localControlAllowed()) {
+            controller.target?.let { if (it.isPlaying) it.pause() else it.play() }
+        } else {
+            Log.info("[cinema] 成员端不响应播放快捷键（控制权在房主）")
+        }
     }
     Shortcuts.onSeekBy = { delta ->
-        controller.target?.let { it.seekTo((it.currentPositionMs + delta).coerceAtLeast(0)) }
+        if (localControlAllowed()) {
+            controller.target?.let { it.seekTo((it.currentPositionMs + delta).coerceAtLeast(0)) }
+        } else {
+            Log.info("[cinema] 成员端不响应拖动快捷键（控制权在房主）")
+        }
     }
     Shortcuts.onVolumeBy = { delta ->
         volume = (volume + delta).coerceIn(0f, 1f)
@@ -478,6 +518,8 @@ fun AppRoot(
                     autoplay = autoplay,
                     onVolumeChange = { setVolume(it) },
                     onOpenFile = chooseFile,
+                    movies = movies,
+                    onSelectMovie = { selectForHall(it) },
                 )
 
                 Screen.Library -> LibraryScreen(
@@ -499,7 +541,7 @@ fun AppRoot(
                     onRemoveRoot = { catalog.removeRoot(it) },
                     onScan = { scope.launch { catalog.scan() } },
                     onCancel = { catalog.cancel() },
-                    onPlay = { openFile(it) },
+                    onSelect = { openFile(it) },
                 )
 
                 Screen.Settings -> SettingsScreen(
@@ -620,7 +662,7 @@ private fun LibraryScreen(
     onRemoveRoot: (String) -> Unit,
     onScan: () -> Unit,
     onCancel: () -> Unit,
-    onPlay: (DesktopMovie) -> Unit,
+    onSelect: (DesktopMovie) -> Unit,
 ) {
     val colors = LocalCinemaColors.current
     var manualPath by remember { mutableStateOf("") }
@@ -722,7 +764,7 @@ private fun LibraryScreen(
                                     style = MaterialTheme.typography.labelSmall,
                                 )
                             }
-                            TextButton(onClick = { onPlay(movie) }) { Text("播放") }
+                            TextButton(onClick = { onSelect(movie) }) { Text("选择") }
                         }
                         HorizontalDivider(color = colors.line)
                     }

@@ -930,6 +930,9 @@ class CinemaSyncEngine(
      */
     fun onTick(nowClockMs: Long) {
         detectPlayStateChange(nowClockMs)
+        // 房主的时间轴若还没建立，就地按播放器此刻的事实锚一次（见 [anchorHostIfNeeded]）。
+        // 排在 detectPlayStateChange 之后：那一条若已经发现变更并锚过，这里就什么都不做。
+        anchorHostIfNeeded(nowClockMs)
         // 跳转后的落点确认排在两条 flush 之后、校之前：它可能改动锚点并补发一条
         // seek，必须在校准读到漂移**之前**完成，否则那一拍会先按旧锚点硬跳一次。
         confirmSeekLanding(nowClockMs)
@@ -982,6 +985,38 @@ class CinemaSyncEngine(
                 "${if (actual) "播" else "暂停"}到 $position ms 并广播，避免被心跳自愈回原状",
         )
         anchorLocal(nowClockMs, position, isPlaying = actual)
+    }
+
+    /**
+     * 房主侧「就地锚定」：时间轴还没建过、而播放器已经装好片源时，直接按播放器此刻的
+     * 事实建一次锚点。
+     *
+     * ── 为什么需要它（2026-11-06 真机：房主那台面板一直是 `anchored=false`）──────────
+     * 房主的时间轴原本只在**本机做了一次操作**（play / pause / seek）时建立
+     * （[anchorLocal]）。而产品路径里最常见的起播根本不走那三个入口：
+     * `--open` 与「选好片自动播放」都是播放器自己在组合里 `play()`，引擎是**先挂上
+     * 播放器、后看到它已经在播**。此时 `expectedPlayRequested` 在建引擎/建链时已由
+     * [resetSyncState] 按事实记成 true，于是 [detectPlayStateChange] 判「没变化」，
+     * 一次都不广播、也不锚定 —— 面板永远 `anchored=false`，从端只能等心跳，
+     * 而心跳要等下一个 `heartbeatIntervalMs` 才发第一条。
+     *
+     * 只对房主做：从端的时间轴必须由房主定义，它自己锚一次就是「各播各的」。
+     * 判据用 `isReady` 而不是 `durationMs > 0`：libVLC 在 `Opening` 阶段时长可能还是 0，
+     * 而 `onTrack`（`isReady`）才是「这条媒体真的装载了」的时刻。
+     */
+    private fun anchorHostIfNeeded(nowClockMs: Long) {
+        if (!host) return
+        if (timeline.isAnchored) return
+        if (!player.isReady) return
+        val position = player.currentPositionMs
+        expectedPlayRequested = player.isPlayRequested
+        lastKnownPlaying = expectedPlayRequested
+        anchorLocal(nowClockMs, position, isPlaying = expectedPlayRequested)
+        note(
+            "房主时间轴就地锚定：$position ms（" +
+                (if (expectedPlayRequested) "播放中" else "暂停") +
+                "）—— 本机起播没走引擎入口，由这里补上",
+        )
     }
 
     /**

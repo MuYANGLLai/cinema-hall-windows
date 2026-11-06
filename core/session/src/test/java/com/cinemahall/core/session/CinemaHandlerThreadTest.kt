@@ -115,6 +115,57 @@ class CinemaHandlerThreadTest {
         assertNull("没有引擎时不该凭空造出一个", handler.syncEngine)
     }
 
+    @Test
+    fun 引擎比房间晚建时仍然认得房主() = withEngineThread { dispatcher ->
+        // 真机形状（2026-11-06）：「自动进房」跑在影厅页之外，房间先到、引擎后建。
+        // 那时 `applyHost()` 已经跑过一遍，但 `engine` 还是 null —— 什么都灌不进去。
+        // 之后建引擎时若只补 `setRole`，`hostUserId` 就永远是 null，于是房主发来的
+        // `heartbeat` / `state_snapshot` 全被 `mayApply()` 按「从端只接受房主的控制
+        // （房主=未定）」丢掉：从端 `anchored=false` 一动不动，**且没有任何报错**。
+        // 这是纯时序竞态 —— 引擎先建就正常，后建就永久失效。
+        val handler = CinemaHandler(dispatcher)
+
+        // ① 房间先到：本机是从端，房主是 PEER。
+        handler.onRoomUpdated(room(host = PEER), ME)
+
+        // ② 引擎后建（影厅页首次组合才 attach）。
+        val player = TouchRecordingPlayer()
+        val engine = handler.attachPlayback(player)
+
+        // ③ 房主的心跳到：必须被接受并用来锚定。
+        runBlocking {
+            handler.onMessage(
+                CinemaPlayback.ACTION_HEARTBEAT,
+                Envelope(
+                    type = CinemaPlayback.TYPE_HEARTBEAT,
+                    seq = 1L,
+                    roomId = "4F7K2Q",
+                    from = PEER.value,
+                    sentAtMs = 0L,
+                    payload = CinemaPlaybackCodec.encodeHeartbeat(
+                        CinemaHeartbeat(
+                            isPlaying = true,
+                            positionMs = 42_000L,
+                            senderClockMs = 0L,
+                        ),
+                    ),
+                ),
+            )
+        }
+
+        // 等引擎线程把这条消息跑完（onMessage 是 suspend，Unconfined 之外要等一下）。
+        eventually { engine.status.value.isAnchored }
+        assertTrue(
+            "从端必须认得房主：心跳要能建立时间轴，实际 lastEvent=${engine.status.value.lastEvent}",
+            engine.status.value.isAnchored,
+        )
+        assertEquals(
+            "锚点位置要等于心跳里的位置（本机时钟为 0 时无补偿）",
+            42_000L,
+            engine.status.value.anchoredMediaMs,
+        )
+    }
+
     private fun pauseEnvelope() = Envelope(
         type = CinemaPlayback.TYPE_PAUSE,
         seq = 1L,
@@ -153,6 +204,20 @@ class CinemaHandlerThreadTest {
             block(dispatcher)
         } finally {
             dispatcher.close()
+        }
+    }
+
+    /**
+     * 等引擎线程把一件事跑完（最多 2 秒）。
+     *
+     * `onMessage` 会被 `onEngineThread` 丢到引擎线程上执行，而断言在测试线程上跑 ——
+     * 直接断言会偶发假失败（本机够快时通常已经跑完，CI 上就未必）。
+     */
+    private fun eventually(timeoutMs: Long = 2_000L, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (condition()) return
+            Thread.sleep(10)
         }
     }
 

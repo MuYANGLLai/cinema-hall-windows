@@ -128,6 +128,44 @@ class CinemaSyncEngineTest {
     }
 
     @Test
+    fun 房主的起播发生在引擎入口之外时_tick_会就地锚定() {
+        // 产品路径里最常见的起播**不走** `onLocalPlay`：`--open` 与「选好片就播」
+        // 都是播放器自己在组合里 `play()`，引擎是先挂上播放器、后看到它已经在播。
+        // 建链时 `resetSyncState()` 把播放态按事实记成 true ⇒ `detectPlayStateChange`
+        // 判「没变化」⇒ 房主的时间轴永远没人建立：面板一直 `anchored=false`，
+        // 从端只能干等心跳。2026-11-06 的真机就是这个形状。
+        player.play()
+        now = 11_000L
+        engine.setRole(true)
+        engine.onLinkOpened()
+        assertFalse("建链那一刻还没有任何人建立时间轴", engine.status.value.isAnchored)
+
+        engine.onTick(now)
+
+        val st = engine.status.value
+        assertTrue("tick 之后房主的时间轴必须已经建立", st.isAnchored)
+        assertEquals("锚点就是播放器此刻的位置", 1_000L, st.anchoredMediaMs)
+        assertEquals("外推出去的目标与本地位置一致", 1_000L, st.targetPositionMs)
+        assertTrue(st.lastEvent.contains("就地锚定"))
+    }
+
+    @Test
+    fun 从端在同样情况下不自己锚定() {
+        // 同一次 tick 对从端必须**什么都不做**：它的时间轴只能由房主定义。
+        // 从端自己锚一次，就等于「各播各的」—— 而且不会有任何报错。
+        player.play()
+        now = 11_000L
+        engine.setRole(false)
+        engine.onLinkOpened()
+        sent.clear()
+
+        engine.onTick(now)
+
+        assertFalse("从端不许自建时间轴", engine.status.value.isAnchored)
+        assertTrue("也不许因为这件事广播任何东西", sent.isEmpty())
+    }
+
+    @Test
     fun 房主按心跳间隔广播心跳而不是每个_tick_都发() {
         engine.setRole(true)
         engine.onLinkOpened()   // 心跳基准落在此刻 = 10_000

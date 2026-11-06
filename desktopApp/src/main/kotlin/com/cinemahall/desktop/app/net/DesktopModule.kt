@@ -98,6 +98,9 @@ class DesktopModule(
                 Log.info("[module] swing 心跳 #$it")
             }
         }
+        // 播放同步的节拍器。放在构造期而不是 `connect()`：它与「连没连上服务端」无关，
+        // 而引擎要等影厅页组合后才出现 —— 早起的循环每轮重读一次，晚到也不漏。
+        ensureSyncTicker()
     }
 
     val router = MessageRouter(listOf(handler))
@@ -225,6 +228,47 @@ class DesktopModule(
     private var statsJob: kotlinx.coroutines.Job? = null
 
     /**
+     * 播放同步的节拍器：每 `localTickMs`（默认 500ms）调一次 `CinemaSyncEngine.onTick`。
+     *
+     * ── 为什么必须有它（2026-11-06 真机：两个方向的播放同步都不动）──────────────────
+     * 引擎**自己不持有协程**（见 `CinemaSyncEngine` 的类注释：所有输入都由外部驱动，
+     * 这样 §6.3 的每一档才能在单测里用假时钟逐毫秒断言）。定时驱动于是成了装配点的责任：
+     * Android 那条在 `CinemaSessionService` 的循环里（`syncEngine?.onTick(now)`），
+     * 而桌面这一侧**一直没有对应的循环** —— `onTick` 一次都没被调用过。四个后果同时出现：
+     *
+     *  1. 房主不发心跳（心跳只在 `onTick` 里发）⇒ 从端没有任何东西可用来对齐；
+     *  2. `detectPlayStateChange` 从不运行 ⇒ 本机起播 / 暂停一次都没被广播出去；
+     *  3. 从端 `runFollowerCorrection` 从不运行 ⇒ 漂移不计算、硬 seek 不发生；
+     *  4. 从端的时钟探测（`sync_ack`）从不发起 ⇒ RTT 恒为 0、`rttHalf` 恒为 0。
+     *
+     * 面板上看到的是「链路已通、角色正确、`anchored=false`、两个方向一动不动」——
+     * 与「同步算法坏了」完全同形，所以这一条必须先于任何算法改动被查出来。
+     *
+     * ── 为什么每轮重新读 ──────────────────────────────────────────────────────
+     * 引擎是界面在影厅页首次组合时才建的（`attachPlayback`），节拍器若在构造期抓一个
+     * 引用，抓到的就是 null 且永不恢复；`localTickMs` 也能在「设置 → 播放设置」里改，
+     * 缓存它就等于让那条设置不生效。
+     *
+     * 线程：`scope` 是 `Dispatchers.Swing`，与 `CinemaHandler.engineDispatcher` 同一条
+     * —— 引擎内部不加锁，全部状态改动必须落在同一线程。
+     */
+    private var syncTickJob: kotlinx.coroutines.Job? = null
+
+    private fun ensureSyncTicker() {
+        if (syncTickJob?.isActive == true) return
+        syncTickJob = scope.launch {
+            while (true) {
+                val engine = handler.syncEngine
+                if (engine != null) {
+                    runCatching { engine.onTick(clock.nowMs()) }
+                        .onFailure { Log.warn("[sync] tick 异常：${it.javaClass.simpleName}: ${it.message}") }
+                }
+                delay(handler.syncConfig.localTickMs)
+            }
+        }
+    }
+
+    /**
      * 建协调者并把它接到玩法上。**可以重复调用**（界面重建、换账号），已存在时直接返回。
      *
      * 必须在 [connect] 之前调用一次。
@@ -304,8 +348,18 @@ class DesktopModule(
         }
     }
 
-    /** 影厅页首次组合时调一次。同一个播放器只建一个引擎。 */
-    fun attachPlayback(player: PlaybackTarget): CinemaSyncEngine = handler.attachPlayback(player)
+    /**
+     * 影厅页首次组合时调一次。同一个播放器只建一个引擎。
+     *
+     * 建引擎的同时确保节拍器在跑：`onTick` 是引擎唯一的定时输入，少了它这条引擎
+     * 就只是个不会动的状态机（见 [ensureSyncTicker]）。
+     */
+    fun attachPlayback(player: PlaybackTarget): CinemaSyncEngine {
+        val engine = handler.attachPlayback(player)
+        ensureSyncTicker()
+        return engine
+    }
+
 
     /**
      * 房间视图变了（进房 / 退房 / 成员上下线）。由 UI 层订阅 `signaler.room` 后调用。
