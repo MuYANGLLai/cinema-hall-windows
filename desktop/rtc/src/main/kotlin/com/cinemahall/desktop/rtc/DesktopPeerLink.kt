@@ -166,7 +166,10 @@ class DesktopPeerLink(
     // ── 通话意图（资源在 C3/C4 才有）──────────────────────────────────────────
     private var callRequested = false
     private var callVolume = CallAudioState.DEFAULT_VOLUME
-    private var movieVolumeLimited = true
+    /** 麦克风发送音量：桌面端采集是自有 PCM，这是**真增益**（见 [pushWithGain]）。 */
+    private var micVolume = 1f
+    // 兜底开关默认关（2026-11-06 用户口径；见 `CallAudioState.limitMovieVolume`）。
+    private var movieVolumeLimited = false
 
     // ── 对外 API ───────────────────────────────────────────────────────────
 
@@ -360,9 +363,10 @@ class DesktopPeerLink(
         val started = device.start(
             onBlock = { block ->
                 // ⚠️ 这里在 **helper 的读取线程**上：单线程按帧序推，正是 pushAudio 的要求。
-                // 先过 AEC（用本机正在放出来的声音作参考），再推进发送端。
+                // 先过 AEC（用本机正在放出来的声音作参考），再按「麦克风输入音量」缩放，
+                // 最后推进发送端。
                 val processed = aec?.capture(block) ?: block
-                backend.pushCapturePcm(processed)
+                backend.pushCapturePcm(pushWithGain(processed))
             },
             onState = { state, note ->
                 // 回调来自采集线程：状态改动一律回到 dispatcher 线程。
@@ -398,6 +402,15 @@ class DesktopPeerLink(
         callVolume = volume.coerceIn(0f, 1f)
         // 音量在播放线程上逐帧生效，改这里不需要重开设备、也不会打断正在说的话。
         backend.setRemoteVolume(callVolume)
+        refreshCallAudio()
+    }
+
+    /**
+     * 麦克风**发送**音量。桌面端的采集是我们自己的 PCM 块（见 [AudioUplink]），
+     * 所以这里是**真增益**：在推给发送端之前把样点按系数缩放。
+     */
+    override fun setMicVolume(volume: Float) = post {
+        micVolume = volume.coerceIn(0f, 1f)
         refreshCallAudio()
     }
 
@@ -582,9 +595,32 @@ class DesktopPeerLink(
             it.copy(
                 requested = callRequested,
                 volume = callVolume,
+                micVolume = micVolume,
                 limitMovieVolume = movieVolumeLimited,
             )
         }
+    }
+
+    /**
+     * 按 [micVolume] 缩放一块 16-bit 小端单声道 PCM。
+     *
+     * 1.0 时原样返回（不复制）：这是唯一的高频路径（每 10 ms 一次），常态下不该多一次分配。
+     */
+    private fun pushWithGain(block: ByteArray): ByteArray {
+        val gain = micVolume
+        if (gain >= 0.999f) return block
+        val out = ByteArray(block.size)
+        var index = 0
+        while (index + 1 < block.size) {
+            val lo = block[index].toInt() and 0xFF
+            val hi = block[index + 1].toInt()
+            val sample = ((hi shl 8) or lo).toShort().toInt()
+            val scaled = (sample * gain).toInt().coerceIn(-32768, 32767)
+            out[index] = (scaled and 0xFF).toByte()
+            out[index + 1] = ((scaled shr 8) and 0xFF).toByte()
+            index += 2
+        }
+        return out
     }
 
     private data class PendingCandidate(

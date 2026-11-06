@@ -308,6 +308,21 @@ class CinemaSyncEngine(
     private var pendingSeekBroadcast: Long? = null
     private var lastSeekBroadcastAtMs = 0L
 
+    /**
+     * 「等片源就绪后再补做一次对齐」的标记。
+     *
+     * ── 为什么需要它（2026-11-06 用户报「点播放没同步到房主进度」）──────────────
+     * 刚进房、各台机器记的播放进度不一样时：房主按播放，从端收到 `play` 只做了
+     * 「锚时间轴 + 起播」，位置仍停在**它自己记的位置**；而随后那几拍里
+     * [runFollowerCorrection] 会因为 `!player.isReady`（片源刚装载、还没解析完）
+     * 整拍跳过 —— 那条跳过本身是对的（没装载好的位置必然是假数字，硬 seek 会撞上
+     * 「大文件重建索引把界面冻住」），但它把这一次对齐也一起吞了。
+     * 用户看到的就是「要再按一次暂停/播放才对上」：暂停那条路自己带一次 seek。
+     *
+     * 现在 play/pause 收到时若还没就绪，就把这次对齐记下来，等第一个「就绪」的 tick 补做。
+     */
+    private var alignWhenReady = false
+
     private var lastDriftMs = 0L
     private var tier = CinemaSyncStatus.TIER_IDLE
     private var lastHeartbeatSeq = 0L
@@ -1084,6 +1099,29 @@ class CinemaSyncEngine(
             return
         }
 
+        // 片源刚就绪，而收到 play/pause 时的那次对齐还没做：在这里补上。
+        // 判据用同一拍的 `lastDriftMs`，动作与 `seek` 那一条完全一致（同一条静默期语义）。
+        if (alignWhenReady) {
+            alignWhenReady = false
+            // 起播那一次 `play()` 可能因为「还没就绪」被播放器吞掉（各平台语义不同：
+            // Media3 会把 playWhenReady 记下来，而有的实现直接空操作）。补对齐时顺手
+            // 再要一次播放 —— 否则会出现「位置对齐了，但画面停在原地」。
+            if (timeline.isRunning && !player.isPlayRequested) player.play()
+            if (abs(lastDriftMs) >= config.softDriftMs) {
+                player.seekTo(target)
+                applySpeed(1f)
+                settleUntilMs = nowClockMs + config.seekSettleMs
+                tier = CinemaSyncStatus.TIER_SETTLE
+                hardSeeks += 1
+                note(
+                    "片源就绪：补做进房/换片时那次对齐 —— 本机差 $lastDriftMs ms" +
+                        "（≥ 软阈值 ${config.softDriftMs}）→ seek 到 $target ms",
+                )
+                return
+            }
+            note("片源就绪：补做对齐时本机差 $lastDriftMs ms，在软阈值内，不 seek")
+        }
+
         // 只有真正被判断过的漂移才进历史（§9.3 的折线）。静默期与缓冲期的观测值
         // 是过渡态垃圾，混进折线会让「同步是否在收敛」这件事看起来无规律地抖。
         // 累计峰值取**同一批采样**（见 [recordDriftPeak]）。
@@ -1133,8 +1171,41 @@ class CinemaSyncEngine(
     }
 
     /**
-     * 把「整场倍速 × 漂移因子」写进播放器。
+     * 从端：把本机位置**立刻**对齐到房主的时间轴（收到 play / pause 时用）。
      *
+     * ── 为什么不靠 [runFollowerCorrection] 自己收敛 ─────────────────────────────
+     * 那是「稳态每拍微调」的通道，它在三档里有两条会整拍跳过（静默期、未就绪）。
+     * 而用户按播放是一个**离散事件**：这一下就该看到「所有人从房主的进度开始」，
+     * 而不是「先各自播两秒、再被算法慢慢拉回来」。所以这里直接按软阈值判一次。
+     *
+     * 未就绪时不 seek（那是「大文件重建索引把界面冻住」的老坑，见 [runFollowerCorrection]
+     * 里 `!player.isReady` 那段），改为记 [alignWhenReady]，等就绪后的第一拍补做。
+     */
+    private fun alignFollowerToHost(
+        nowClockMs: Long,
+        reason: String,
+    ) {
+        if (host) return
+        if (!timeline.isAnchored) return
+        val target = timeline.targetPositionMs(nowClockMs)
+        if (!player.isReady) {
+            alignWhenReady = true
+            note("$reason：片源还没就绪，记下这次对齐，就绪后补做（目标 $target ms）")
+            return
+        }
+        val gap = abs(player.currentPositionMs - target)
+        if (gap >= config.softDriftMs) {
+            player.seekTo(target)
+            applySpeed(1f)
+            settleUntilMs = nowClockMs + config.seekSettleMs
+            tier = CinemaSyncStatus.TIER_SETTLE
+            note("$reason：本机差 $gap ms（≥ 软阈值 ${config.softDriftMs}）→ 直接 seek 到 $target ms")
+        } else {
+            note("$reason：本机差 $gap ms，在软阈值内，不 seek")
+        }
+    }
+
+    /**
      * ── 为什么去重不能省 ──────────────────────────────────────────────────────
      * `setPlaybackParameters` 每次调用都会重建 Sonic 的时间伸缩状态，而 §6.3 的
      * 校准每 500ms 就问一次「要不要变速」。不去重的话，声音会一直在重建处咔嗒。
@@ -1213,6 +1284,9 @@ class CinemaSyncEngine(
                 if (!player.isPlayRequested) player.play()
                 noteCurrentPlayState()
                 note("收到 ${CinemaPlayback.TYPE_PLAY}：positionMs=${payload.positionMs}，目标 ${timeline.targetPositionMs(now)} ms")
+                // 「按一下播放」是一次离散事件：这一下就该落到房主的进度上，不能等
+                // 三档校准慢慢收敛（未就绪时它会整拍跳过，症状就是要再按一次暂停）。
+                alignFollowerToHost(now, "收到 ${CinemaPlayback.TYPE_PLAY}")
             }
 
             CinemaPlayback.ACTION_PAUSE -> {
@@ -1221,14 +1295,21 @@ class CinemaSyncEngine(
                 anchorFromHost(now, payload.positionMs, isPlaying = false, senderClockMs = payload.senderClockMs)
                 player.pause()
                 noteCurrentPlayState()
-                val gap = abs(player.currentPositionMs - timeline.anchoredMediaMs)
-                if (gap >= config.softDriftMs) {
-                    player.seekTo(timeline.anchoredMediaMs)
-                    settleUntilMs = now + config.seekSettleMs
-                    tier = CinemaSyncStatus.TIER_SETTLE
-                    note("收到 ${CinemaPlayback.TYPE_PAUSE}：本机差 ${gap} ms（≥ 软阈值），已 seek 到 ${timeline.anchoredMediaMs} ms")
+                if (!player.isReady) {
+                    // 未就绪时 `currentPositionMs` 是假数字：不硬 seek，但这次对齐不能丢
+                    // （与 play 同一条理由，见 [alignWhenReady]）。
+                    alignWhenReady = true
+                    note("收到 ${CinemaPlayback.TYPE_PAUSE}：片源还没就绪，记下这次对齐，就绪后补做")
                 } else {
-                    note("收到 ${CinemaPlayback.TYPE_PAUSE}：本机差 ${gap} ms，在软阈值内，只暂停不 seek")
+                    val gap = abs(player.currentPositionMs - timeline.anchoredMediaMs)
+                    if (gap >= config.softDriftMs) {
+                        player.seekTo(timeline.anchoredMediaMs)
+                        settleUntilMs = now + config.seekSettleMs
+                        tier = CinemaSyncStatus.TIER_SETTLE
+                        note("收到 ${CinemaPlayback.TYPE_PAUSE}：本机差 ${gap} ms（≥ 软阈值），已 seek 到 ${timeline.anchoredMediaMs} ms")
+                    } else {
+                        note("收到 ${CinemaPlayback.TYPE_PAUSE}：本机差 ${gap} ms，在软阈值内，只暂停不 seek")
+                    }
                 }
             }
 
@@ -1723,6 +1804,8 @@ class CinemaSyncEngine(
         lastSpeedBroadcastAtMs = 0L
         pendingSeekBroadcast = null
         lastSeekBroadcastAtMs = 0L
+        // 换链路 / 换片：上一次没做完的「就绪后补做对齐」不该带到新的一场里。
+        alignWhenReady = false
         // 播放态的记账基线取**播放器此刻的事实**，而不是写死 false：
         // 链路刚通时若记成 false 而本机其实在播（换链路、对端重装后重连），
         // 下一个 tick 就会凭空广播一条 play 出去。

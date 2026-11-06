@@ -242,14 +242,35 @@ class CinemaCallResetTest {
         members = members,
         modeState = null,
     )
-
     private companion object {
         val ME = UserId("me")
+    }
+
+    @Test
+    fun 没绑链路时也能调通话音量_并且连通后把这个值下发() {
+        // 用户口径（2026-11-06）：通话没连通时也要能调「接收音量」。
+        // 旧实现里未绑链路 ⇒ 订阅的是 idle 状态流、`setCallVolume` 是空操作，
+        // 滑块一松手就弹回默认值 —— 看着像控件坏了。
+        val handler = CinemaHandler(Dispatchers.Unconfined)
+        handler.setCallVolume(0.3f)
+        assertEquals(
+            "没链路时状态流里也要是用户调的那个值",
+            0.3f,
+            handler.callAudio.value.volume,
+        )
+
+        val audio = RecordingCallAudio()
+        handler.bindCallAudio(audio)
+        assertEquals(
+            "链路一建好就要把用户之前调好的音量下发过去，否则会被打回 100%",
+            listOf(0.3f),
+            audio.volumes,
+        )
     }
 }
 
 /**
- * 记下每一次 `setCallEnabled` 的假音频命令面。
+ * 记下每一次 `setCallEnabled` / `setCallVolume` 的假音频命令面。
  *
  * 真的 `WebRtcPeerLink.setCallEnabled` 是**幂等**的（与当前值相同就是空操作），
  * 这里刻意不幂等：用例要看的恰恰是「`CinemaHandler` 有没有**发起**这次复位」，
@@ -261,13 +282,18 @@ private class RecordingCallAudio : CallAudio {
 
     val calls = mutableListOf<Boolean>()
 
+    /** 收到过的音量下发（按顺序）。 */
+    val volumes = mutableListOf<Float>()
+
     override val callAudio: StateFlow<CallAudioState> get() = state
 
     override fun setCallEnabled(enabled: Boolean) {
         calls += enabled
     }
 
-    override fun setCallVolume(volume: Float) = Unit
+    override fun setCallVolume(volume: Float) {
+        volumes += volume
+    }
 
     override fun setMovieVolumeLimit(enabled: Boolean) = Unit
 }

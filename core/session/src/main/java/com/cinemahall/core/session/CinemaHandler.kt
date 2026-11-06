@@ -179,8 +179,30 @@ class CinemaHandler(
      */
     private val idleCallAudio = MutableStateFlow(CallAudioState())
 
+    /**
+     * 用户调过的通话音量（0..1）。**链路建没建都要记住**。
+     *
+     * ── 为什么得在 handler 里存一份（2026-11-06 用户报「没连通调不了音量大」）────────
+     * 未进房 / 链路没建时 `callSource` 是 null：界面订阅的是 [idleCallAudio]，
+     * [setCallVolume] 也是空操作 —— 用户拖动滑块，松手就弹回默认值，看着像控件坏了。
+     * 音量是**用户偏好**，不是链路状态；它应该独立于链路存在。
+     */
+    @Volatile
+    private var callVolumePreference = CallAudioState.DEFAULT_VOLUME
+
+    /** 麦克风发送音量（同上：链路没建也要记住）。 */
+    @Volatile
+    private var micVolumePreference = 1f
+
     fun bindCallAudio(source: CallAudio?) {
         callSource = source
+        // 新链路一绑上就把用户之前调过的音量交过去，否则「没连通时调好的 30%」
+        // 会在连通那一刻被打回 100% —— 用户以为滑块根本没生效。
+        source?.setCallVolume(callVolumePreference)
+        source?.setMicVolume(micVolumePreference)
+        idleCallAudio.update {
+            it.copy(volume = callVolumePreference, micVolume = micVolumePreference)
+        }
     }
 
     /**
@@ -221,9 +243,27 @@ class CinemaHandler(
         callSource?.setCallEnabled(enabled)
     }
 
-    /** 通话音量 0f..1f。没绑上时是空操作。 */
+    /**
+     * 通话音量 0f..1f。**没绑上链路时也生效**（记在 [callVolumePreference] 里）——
+     * 见那个字段的注释：用户没连通时调的音量，要能留到连通之后。
+     */
     override fun setCallVolume(volume: Float) {
-        callSource?.setCallVolume(volume)
+        val clamped = volume.coerceIn(0f, 1f)
+        callVolumePreference = clamped
+        // 没链路时界面订阅的就是这条流：不写它，滑块松手就弹回默认值。
+        idleCallAudio.update { it.copy(volume = clamped) }
+        callSource?.setCallVolume(clamped)
+    }
+
+    /**
+     * 麦克风发送音量 0f..1f。与 [setCallVolume] 同一条规则：没绑链路也要记住。
+     * 「0」在这一层就是静音（各平台怎么实现见 [CallAudio.setMicVolume]）。
+     */
+    override fun setMicVolume(volume: Float) {
+        val clamped = volume.coerceIn(0f, 1f)
+        micVolumePreference = clamped
+        idleCallAudio.update { it.copy(micVolume = clamped) }
+        callSource?.setMicVolume(clamped)
     }
 
     /** 通话中限制影片音量（§471 兜底开关）。没绑上时是空操作。 */

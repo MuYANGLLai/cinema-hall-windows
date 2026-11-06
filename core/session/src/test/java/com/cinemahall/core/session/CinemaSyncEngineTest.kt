@@ -903,8 +903,56 @@ class CinemaSyncEngineTest {
     }
 
     @Test
-    fun 收到_seek_时无条件立即跳转并进入静默期() {
-        followerAnchoredAndPlaying()
+    fun 收到_play_时立刻把本机对齐到房主进度() {
+        // 现场（2026-11-06 用户报）：刚进房选完片，各台记的进度不一样；房主按播放后，
+        // 从端停在自己记的位置，要再按一次暂停/播放才对上。
+        // 判据：收到 play 这**一下**就得落到房主的时间轴，而不是等下一拍三档校准。
+        engine.setRole(false)
+        engine.onLinkOpened()
+        player.ready = true
+        // 本机记忆的进度：5 分钟处；房主在 20 分钟处按的播放。
+        player.seekTo(5 * 60_000L)
+        val seeksBefore = player.seekCount
+
+        engine.onRemote(CinemaPlayback.ACTION_PLAY, positionEnv(CinemaPlayback.ACTION_PLAY, 20 * 60_000L))
+
+        assertEquals("收到播放就该落到房主进度上", seeksBefore + 1, player.seekCount)
+        assertEquals(20 * 60_000L, player.currentPositionMs)
+        assertTrue(player.isPlaying)
+        assertEquals(CinemaSyncStatus.TIER_SETTLE, engine.status.value.tier)
+    }
+
+    @Test
+    fun 片源未就绪时收到_play_不硬_seek_就绪后第一拍补做() {
+        // 未就绪时 `currentPositionMs` 是假数字：硬 seek 在 5GB 文件上会重建索引、
+        // 把界面冻住（2026-11-06 真机「卡死」的那一半原因）。所以这一拍只能记账，
+        // 但这次对齐**不能丢** —— 否则就是用户看到的「要再按一次暂停才对上」。
+        engine.setRole(false)
+        engine.onLinkOpened()
+        player.ready = false
+        player.seekTo(5 * 60_000L)
+        val seeksBefore = player.seekCount
+
+        engine.onRemote(CinemaPlayback.ACTION_PLAY, positionEnv(CinemaPlayback.ACTION_PLAY, 20 * 60_000L))
+        assertEquals("未就绪时不许硬 seek", seeksBefore, player.seekCount)
+
+        // 这一拍什么都不做（位置是假数字），但档位要如实说明「为什么没动」。
+        engine.onTick(now)
+        assertEquals(CinemaSyncStatus.TIER_NOT_READY, engine.status.value.tier)
+        assertEquals(seeksBefore, player.seekCount)
+
+        // 就绪后的第一拍：补做那次对齐，并且把「起播被吞掉」的播放再要一次。
+        player.ready = true
+        now += 100
+        engine.onTick(now)
+
+        assertEquals("就绪后必须补上这次 seek", seeksBefore + 1, player.seekCount)
+        assertEquals(20 * 60_000L + 100, player.currentPositionMs)
+        assertTrue("位置对齐了但没在播，等于没修", player.isPlaying)
+    }
+
+    @Test
+    fun 收到_seek_时无条件立即跳转并进入静默期() {        followerAnchoredAndPlaying()
         val seeksBefore = player.seekCount
 
         engine.onRemote(CinemaPlayback.ACTION_SEEK, positionEnv(CinemaPlayback.ACTION_SEEK, 600_000L))
