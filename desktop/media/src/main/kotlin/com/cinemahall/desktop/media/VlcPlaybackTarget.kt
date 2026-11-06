@@ -47,6 +47,15 @@ class VlcPlaybackTarget(
     @Volatile
     private var mediaPrepared = false
 
+    /**
+     * 媒体**已经装载**（`prepare()` 成功），但还不一定起播过。
+     *
+     * 与 [mediaPrepared] 的区别就是「装载」与「真的播起来」：有了它，[play] 才能在
+     * 「选了片、还没播」这个窗口里走 `controls().play()` 而不是重开。
+     */
+    @Volatile
+    private var mediaLoaded = false
+
     @Volatile
     private var currentUri: String? = null
 
@@ -69,6 +78,28 @@ class VlcPlaybackTarget(
     private var currentVolume: Float = PlaybackTarget.DEFAULT_VOLUME
 
     private val closed = AtomicBoolean(false)
+
+    /**
+     * 会**阻塞**的播放器动作（跳转 / 变速 / 重开影片）统一在这条线程上执行。
+     *
+     * ── 为什么非要一条独立线程（2026-11-06 真机「windows 卡死」）────────────────
+     * `libvlc_media_player_set_time` 是同步的：请求交给输入线程后**等它做完**才返回。
+     * 大文件（5GB x265 MKV）刚打开、索引还没建好时，这一次等待可以长达几十秒。而同步
+     * 引擎的 tick 跑在 Swing 的 EDT 上（引擎要求所有状态改动在同一线程），于是界面、
+     * 托盘、日志一起冻住 —— 现场日志正是 `[link]` 与 `[sync]` 在同一毫秒全停。
+     *
+     * 单线程而不是线程池：顺序有意义（先 seek 后 play 不能颠倒），且不需要并发。
+     */
+    private val control: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "vlc-control").apply { isDaemon = true }
+        }
+
+    /** 最近一次要跳到的位置；[NO_SEEK] = 没有待处理的跳转。 */
+    private val seekTarget = java.util.concurrent.atomic.AtomicLong(NO_SEEK)
+
+    /** 是否已经有一个「排空 seek 目标」的任务挂在 [control] 上（合并用，见 [seekTo]）。 */
+    private val seekQueued = AtomicBoolean(false)
 
     init {
         player.events().addMediaPlayerEventListener(
@@ -159,8 +190,25 @@ class VlcPlaybackTarget(
             }
         }.getOrDefault(false)
 
+    /**
+     * 「媒体装载好了没有」。
+     *
+     * ── 为什么不能只看 [mediaPrepared]（2026-11-06）──────────────────────────────
+     * 那个标记只在 `mediaPlayerReady` / `playing` 事件里才置位，而 `prepare()`（选片但
+     * 不起播）**不一定**触发它。于是一台「已经选好片、停在首帧」的从端会被引擎判成
+     * 「没就绪」——同步校准永远跳过，房主的暂停位置永远对不上。
+     *
+     * 判据改成「有时长、且不在 OPENING」：`length()` 只有在媒体解析出来之后才有值，
+     * 它同时排除了「刚 setMediaItem、还在打开」的那几秒 —— 而那几秒正是同步 seek
+     * 会把输入线程卡死、进而冻住 EDT 的窗口（见 [control]）。
+     */
     override val isReady: Boolean
-        get() = mediaPrepared
+        get() {
+            if (mediaPrepared) return true
+            val status = runCatching { player.status() }.getOrNull() ?: return false
+            return runCatching { status.length() > 0 && status.state() != State.OPENING }
+                .getOrDefault(false)
+        }
 
     override val durationMs: Long
         get() = runCatching { player.status().length() }.getOrDefault(0L).coerceAtLeast(0L)
@@ -203,38 +251,78 @@ class VlcPlaybackTarget(
                 listeners.forEach { l -> l.onPlaybackError(errorText) }
             }
             .getOrDefault(false)
+        mediaLoaded = ok
         log("[vlc] prepare(${ref.uri}) -> $ok")
     }
 
     override fun play() {
         requestedPlaying = true
-        // 未就绪时 setPause 无效（没有输入）；这种情况下走 media().play(uri)，
-        // 它会在同一次调用里完成「打开 + 起播」。这是 Phase 0 里最容易踩空的一步。
-        if (!mediaPrepared) {
-            val uri = currentUri
-            if (uri != null) {
-                val started = runCatching { player.media().play(uri) }.getOrDefault(false)
-                log("[vlc] play(before ready) -> $started")
-                return
-            }
+        // ① 已经起播过：续播。
+        if (mediaPrepared) {
+            runCatching { player.controls().setPause(false) }
+                .recoverCatching { player.controls().play() }
+            return
         }
-        runCatching { player.controls().setPause(false) }
-            .recoverCatching { player.controls().play() }
+        // ② 还没起播，但媒体已经装载（界面 `prepare()` 过）：直接起播，**不重开**。
+        //    旧写法一律走 `media().play(uri)`，那会把位置打回 0、并在大文件上重新解析
+        //    索引；它如果落在 EDT 上，整界面就冻住（2026-11-06 真机「卡死」的一半原因）。
+        if (mediaLoaded) {
+            val ok = runCatching { player.controls().play() }.isSuccess
+            log("[vlc] play(before ready) → controls().play()（不重开，位置保留） ok=$ok")
+            if (ok) return
+        }
+        // ③ 连媒体都没有：只能整条重开，且必须在控制线程上跑（见 [control]）。
+        val uri = currentUri ?: return
+        control.execute {
+            if (closed.get()) return@execute
+            val started = runCatching { player.media().play(uri) }.isSuccess
+            log("[vlc] play(before ready) → media().play()（control 线程） ok=$started")
+        }
     }
 
     override fun pause() {
         requestedPlaying = false
+        // `setPause` 是轻量调用（不触发索引重建），留在调用线程上：暂停的语义要求
+        // 「这一瞬间就停」，排到后台会让用户觉得按键有延迟。
         runCatching { player.controls().setPause(true) }
     }
 
+    /**
+     * 跳转。**永远不在调用线程上执行**（见 [control]）。
+     *
+     * ── 为什么必须挪走（2026-11-06 真机卡死）──────────────────────────────────
+     * `setTime()` 是同步调用：它把 seek 请求丢给输入线程并**等它完成**。刚打开的
+     * 5GB x265 MKV 还没建好索引，这一等可以长达几十秒甚至更久。而引擎的 tick 跑在
+     * Swing 的 EDT 上（引擎所有状态改动必须同一线程），于是整个界面连同托盘一起冻住，
+     * 日志也在同一瞬间全停 —— 现场就是这样：`[link]`/`[sync]` 同时断在 21:33:04.402。
+     *
+     * ── 为什么要合并 ───────────────────────────────────────────────────────────
+     * 引擎在校准档位里可能每 500ms 要求一次硬 seek。排队而不合并的话，控制线程会被
+     * 越积越多的过期目标占满，真实的「最新位置」反而要等很久才生效。
+     * 这里只保留**最后一次**目标位置：语义上 seek 本来就是「最终去哪」，中间过程没有意义。
+     */
     override fun seekTo(positionMs: Long) {
-        if (trySeek(positionMs)) return
-        pending.requestSeek(positionMs)
+        seekTarget.set(positionMs)
+        if (!seekQueued.compareAndSet(false, true)) return
+        control.execute {
+            try {
+                while (!closed.get()) {
+                    val target = seekTarget.getAndSet(NO_SEEK)
+                    if (target == NO_SEEK) break
+                    if (!trySeek(target)) pending.requestSeek(target)
+                }
+            } finally {
+                seekQueued.set(false)
+            }
+        }
     }
 
     override fun setSpeed(speed: Float) {
-        if (tryRate(speed)) return
-        pending.requestRate(speed)
+        // 变速同样会重建视频输出（部分编码下等于一次重新起播），一并挪到控制线程。
+        control.execute {
+            if (closed.get()) return@execute
+            if (!tryRate(speed)) pending.requestRate(speed)
+        }
     }
 
     override fun selectSubtitleTrack(trackIndex: Int) {
@@ -301,6 +389,8 @@ class VlcPlaybackTarget(
     /** 不是端口方法：进程退出/切片时释放 native 资源。 */
     fun close() {
         if (!closed.compareAndSet(false, true)) return
+        // 控制线程可能正卡在一次 seek 里；先中断排队，再停播放器。
+        runCatching { control.shutdownNow() }
         runCatching { player.controls().stop() }
         runCatching { player.release() }
     }
@@ -366,5 +456,10 @@ class VlcPlaybackTarget(
             aspectRatio = ratio
             listeners.forEach { it.onVideoAspectRatio(ratio) }
         }
+    }
+
+    private companion object {
+        /** [seekTarget] 的哨兵值：没有待处理的跳转。用 `Long.MIN_VALUE` 而不是 0 —— 0 是合法的跳转目标。 */
+        const val NO_SEEK = Long.MIN_VALUE
     }
 }

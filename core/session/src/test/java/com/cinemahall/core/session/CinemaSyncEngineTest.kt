@@ -465,6 +465,84 @@ class CinemaSyncEngineTest {
     }
 
     @Test
+    fun 片源没就绪时绝不硬_seek() {
+        // 2026-11-06 真机「windows 卡死」的形状：从端刚 `prepare()` 一部 5GB x265 MKV，
+        // 位置还是 0；房主的心跳说它在 819804 ms。漂移算出 −822805 ms ⇒ 硬阈值 ⇒
+        // `seekTo(819804)`。libVLC 的 `setTime` 是同步的，在这种「索引还没建好」的
+        // 文件上会等几十秒，而引擎跑在 EDT 上 —— 界面、托盘、日志同时冻住。
+        // 判据：没就绪时**一次 seek 都不许发**，档位要说明原因。
+        engine.setRole(false)
+        engine.onLinkOpened()
+        player.ready = false
+
+        now += 500
+        engine.onRemote(
+            CinemaPlayback.ACTION_HEARTBEAT,
+            heartbeatEnv(isPlaying = false, positionMs = 819_804L, senderClockMs = now),
+        )
+        engine.onTick(now + 500)
+
+        assertEquals("没就绪就不许跳", 0, player.seekCount)
+        assertEquals(CinemaSyncStatus.TIER_NOT_READY, engine.status.value.tier)
+        assertTrue("锚点照样要建立（等就绪后再校准）", engine.status.value.isAnchored)
+    }
+
+    @Test
+    fun 片源就绪后同一条件会硬_seek() {
+        // 上一条的对照：就绪之后同一条心跳必须真的跳 —— 否则「跳过校准」会退化成
+        // 「永远不校准」，那正是 0.1.4 之前的症状。
+        engine.setRole(false)
+        engine.onLinkOpened()
+        player.ready = true
+
+        now += 500
+        engine.onRemote(
+            CinemaPlayback.ACTION_HEARTBEAT,
+            heartbeatEnv(isPlaying = false, positionMs = 819_804L, senderClockMs = now),
+        )
+        engine.onTick(now + 500)
+
+        assertTrue("就绪后必须跳到房主的位置", player.seekCount >= 1)
+        assertEquals("这一拍就是硬 seek（静默期从下一拍开始算）", CinemaSyncStatus.TIER_SEEK, engine.status.value.tier)
+    }
+
+    @Test
+    fun 从端的探测与回执发给房主而不是最后打开链路的那个成员() {
+        // 三人房（两台手机 + Windows）的真实形状：`directedPeer` 是「最后打开链路的人」，
+        // 而 `sync_ack` 的语义是「成员 → 房主」。用错人时房主永远收不到回执，
+        // 从端的探测也永远等不到配对，`rtt` 停在 2006ms 这种超时假值上。
+        val tos = mutableListOf<Pair<String, UserId?>>()
+        val trio = CinemaSyncEngine(
+            player = player,
+            clock = { now },
+            outbound = { type, _, to -> tos += type to to },
+            config = CinemaSyncConfig.DEFAULT,
+        )
+        val me = UserId("me")
+        // `heartbeatEnv` 的 `from` 固定是 `peer-user-id`（见 [env]），所以房主就是它。
+        val host = UserId("peer-user-id")
+        trio.setMyUserId(me)
+        trio.setHostUserId(host)
+        trio.setDirectedPeer(UserId("bystander"))   // 最后打开链路的是另一个成员
+        trio.setRole(false)
+        trio.onLinkOpened()
+        tos.clear()
+
+        now += 1_000
+        trio.onRemote(
+            CinemaPlayback.ACTION_HEARTBEAT,
+            heartbeatEnv(isPlaying = true, positionMs = 1_000L, senderClockMs = now),
+        )
+
+        val acks = tos.filter { it.first == CinemaPlayback.TYPE_SYNC_ACK }
+        assertTrue("心跳之后要发起一次探测", acks.isNotEmpty())
+        assertTrue(
+            "sync_ack / 探测必须发给房主，实际发给了：${acks.map { it.second }}",
+            acks.all { it.second == host },
+        )
+    }
+
+    @Test
     fun 拖动广播在连点时会合并成最终位置() {
         engine.setRole(false)
         engine.onLinkOpened()

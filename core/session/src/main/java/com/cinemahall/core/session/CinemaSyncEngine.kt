@@ -125,6 +125,8 @@ data class CinemaSyncStatus(
         const val TIER_SEEK = "硬 seek"
         const val TIER_SETTLE = "静默期（seek 后）"
         const val TIER_BUFFERING = "缓冲中（跳过校准）"
+        /** 片源还没装载好（选片后的一两秒 / 换片重开）——不校准，见 [runFollowerCorrection]。 */
+        const val TIER_NOT_READY = "未就绪（跳过校准）"
         const val TIER_OFF = "校准已关闭"
         const val TIER_IDLE = "—"
     }
@@ -1070,6 +1072,17 @@ class CinemaSyncEngine(
             tier = CinemaSyncStatus.TIER_BUFFERING
             return
         }
+        // 片源还没装载好（选片后的一两秒 / 换片重开）：**不许校准**。
+        //
+        // 这段时间里的 `currentPositionMs` 是 0 或旧值，算出来的漂移必然是天量（现场
+        // 真实数字：−822805 ms），而它正好会触发一次硬 seek —— 在 libVLC 上等于把一个
+        // 刚打开的 5GB 文件强行跳到 13 分钟处，输入线程要重建索引，几十秒都不回来。
+        // 桌面端这条 seek 原本跑在 EDT 上，于是整个界面冻住（2026-11-06 真机「卡死」）。
+        // 引擎在这里挡住，两个平台都受益：没准备好就不该有位置判断。
+        if (!player.isReady) {
+            tier = CinemaSyncStatus.TIER_NOT_READY
+            return
+        }
 
         // 只有真正被判断过的漂移才进历史（§9.3 的折线）。静默期与缓冲期的观测值
         // 是过渡态垃圾，混进折线会让「同步是否在收敛」这件事看起来无规律地抖。
@@ -1564,6 +1577,23 @@ class CinemaSyncEngine(
     }
 
     /**
+     * 「成员 → 房主」那条定向消息该发给谁（`sync_ack` / 探测 / 回执）。
+     *
+     * ── 为什么不能用 [directedPeer]（2026-11-06 真机，两台手机 + Windows）──────────
+     * [directedPeer] 的含义是「最近一次打开链路的那条链路」，它是 P4 之前一对一的残留。
+     * 三人房里它**不是房主**：现场日志里 Windows 从端每 2.5 秒把 `cinema.sync_ack`
+     * 发给另一个**成员**（`→ dv_VPINR`），房主一条也收不到 —— 于是
+     *   1. 从端的探测永远等不到配对回执，`rtt` 停在 2006 ms 这种「超时后的假值」；
+     *   2. `rttHalf` 跟着错，[anchorFromHost] 的飞行时间补偿整体偏掉；
+     *   3. 房主侧也看不到成员的漂移上报（诊断面板那两栏永远是 `-`）。
+     *
+     * 房主自己（`hostUserId == myUserId`）没有上游，仍回落到 [directedPeer]：
+     * 那是它给最近加入的成员下发快照的既有行为，不在本次修复范围内。
+     */
+    private fun ackTarget(): UserId? =
+        hostUserId?.takeIf { it != myUserId } ?: directedPeer
+
+    /**
      * 真的发一条 `cinema.sync_ack` 出去。
      *
      * 与 [maybeSendProbe] 分开，是因为「手动同步」要**绕开**那个 1 秒下限：
@@ -1589,7 +1619,8 @@ class CinemaSyncEngine(
             ),
             // §7：`sync_ack` 是**成员 → 房主**的定向消息（它带的是「我这一端的
             // 时刻与漂移」，广播出去只会让别人的探测配对错乱）。
-            directedPeer,
+            // 收件人取 [ackTarget]：三人以上房间里「房主」与「最后打开链路的成员」不是同一个人。
+            ackTarget(),
         )
     }
 
@@ -1632,7 +1663,8 @@ class CinemaSyncEngine(
                     probeId = probe.id,
                 ),
             ),
-            directedPeer,
+            // 重试也必须发给房主，理由同 [ackTarget]。
+            ackTarget(),
         )
         // 重试之后把计时起点推到「现在」，否则下一次 tick 会立刻再判一次超时。
         probe.t1Ms = now
