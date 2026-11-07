@@ -200,6 +200,14 @@ fun LibraryScreen(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("已选 ${selected.size} 部", color = colors.accent, style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.width(10.dp))
+                // 播放从「点封面」搬到这儿（2026-11-07）：选一部再点它，才去影厅。
+                TextButton(
+                    enabled = selected.size == 1,
+                    onClick = {
+                        val path = selected.firstOrNull()
+                        movies.firstOrNull { it.path.equals(path, ignoreCase = true) }?.let(onSelect)
+                    },
+                ) { Text("播放") }
                 TextButton(onClick = { movingPaths = selected.toList() }) { Text("移动到…") }
                 TextButton(
                     enabled = selected.size == 1,
@@ -536,7 +544,10 @@ private fun CoverTile(
                 color = if (checked) colors.accent else Color.Transparent,
                 shape = RoundedCornerShape(10.dp),
             )
-            .clickable(onClickLabel = "在影厅播放", onClick = onPlay),
+            // 点封面 = **选中**（2026-11-07 用户口径），不再是「跳到影厅播放」。
+            // 播放挪到选中后出现的工具条里那颗「播放」，是一次明确的动作 ——
+            // 想整理片子的人不该被一次误点拉走。
+            .clickable(onClickLabel = "选中", onClick = onToggleSelect),
     ) {
         if (cover != null) {
             Image(
@@ -599,6 +610,14 @@ private fun CoverTile(
                     .padding(horizontal = 6.dp, vertical = 1.dp),
             )
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                // 播放还留着一条明确入口（点封面已经改成选中，见上面那颗 clickable 的注释）。
+                DropdownMenuItem(
+                    text = { Text("在影厅播放") },
+                    onClick = {
+                        menu = false
+                        onPlay()
+                    },
+                )
                 DropdownMenuItem(
                     text = { Text("修改显示名称…") },
                     onClick = {

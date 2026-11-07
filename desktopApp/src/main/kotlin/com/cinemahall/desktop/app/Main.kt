@@ -49,6 +49,19 @@ import javax.imageio.ImageIO
  * ```
  */
 fun main(args: Array<String>) {
+    // ── libVLC 的字符串编码（必须在 JNA 的 Native 类初始化之前设）───────────────
+    //
+    // 症状：字幕菜单里冒出「字幕 1（涓€构）」这种乱码（用户 2026-11-07 反馈）。
+    //
+    // 原因：libVLC 的 C 接口交出来的是 **UTF-8** 字节，而 JNA 的 `String` 映射默认按
+    // **平台字符集**解码 —— 中文 Windows 上那是 GBK。UTF-8 的「简」= E7 AE 80，
+    // 按 GBK 读就是「涓€」。所以要在 JNA 用之前把默认编码改成 UTF-8。
+    //
+    // 这条设置同时修正了**相反方向**：Java → native 也按 UTF-8 编码，而 libVLC 本来就
+    // 期望 UTF-8 的 MRL/路径。中文文件名能播，就不会因为这条变坏（实测同一部中文名
+    // 的片子在改前改后都能起播）。
+    System.setProperty("jna.encoding", "UTF-8")
+
     if (args.contains("--audio-helper")) runAudioHelper()
 
     val options = StartupOptions.parse(args)
@@ -402,7 +415,15 @@ fun main(args: Array<String>) {
                         // 直接入口。先叫出来，再等它真的画出第一帧（ComposePanel 首次
                         // 布局要几百毫秒），最后重新计时一次，别让 2.5 秒在快门那一瞬收回。
                         if (options.hoverCenter) {
-                            val shown = com.cinemahall.desktop.app.ui.PlaybackOverlay.pokeActive()
+                            // 先走**真实路径**：把指针挪到画面中心，看「指针轮询」自己能不能
+                            // 把控制条叫出来（用户晃鼠标走的就是这条）。Robot 在个别会话里
+                            // 挪不动指针，所以挪完还没出来就退回直接调用。
+                            val robot = com.cinemahall.desktop.app.ui.PlaybackOverlay.hoverActiveByRobot()
+                            delay(500)
+                            val viaHover = com.cinemahall.desktop.app.ui.PlaybackOverlay.activeSettled()
+                            if (!viaHover) {
+                                com.cinemahall.desktop.app.ui.PlaybackOverlay.pokeActive()
+                            }
                             var waited = 0
                             while (waited < 3_000 && !com.cinemahall.desktop.app.ui.PlaybackOverlay.activeSettled()) {
                                 delay(100)
@@ -411,7 +432,7 @@ fun main(args: Array<String>) {
                             com.cinemahall.desktop.app.ui.PlaybackOverlay.pokeActive()
                             delay(120)
                             Log.info(
-                                "[ui] 浮层 shown=$shown settled=" +
+                                "[ui] 浮层 robot=$robot hover=$viaHover settled=" +
                                     "${com.cinemahall.desktop.app.ui.PlaybackOverlay.activeSettled()} waited=${waited}ms",
                             )
                         }

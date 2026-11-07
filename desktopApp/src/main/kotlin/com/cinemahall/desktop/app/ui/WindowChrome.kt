@@ -205,7 +205,9 @@ fun DesktopTitleBar(chrome: WindowChrome, title: String) {
             .fillMaxWidth()
             .height(TITLE_BAR_HEIGHT)
             .background(colors.surface2)
-            .pointerHoverIcon(PointerIcon(Cursor(Cursor.MOVE_CURSOR)))
+            // 光标**保持默认箭头**（2026-11-07 用户口径）：系统标题栏本来就不会变成
+            // 四向移动光标，自绘的这块也不该标新立异 —— 一个十字方向标只会让人以为
+            // 这块是「可以拖动的控件」，反而不敢点。
             .pointerInput(chrome) {
                 detectDragGestures(
                     onDragStart = {

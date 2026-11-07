@@ -525,6 +525,9 @@ class VlcPlaybackTarget(
             Regex("\\[([^]]+)]").find(description.description())?.groupValues?.get(1).orEmpty()
         }
         if (names != subtitleNames) {
+            // 原始串一并记下来：字幕语言名曾经出现「涓€构」这类乱码（libVLC 交 UTF-8、
+            // JNA 按平台字符集 GBK 解码），有这一行就能当场判断修没修好。
+            log("[vlc] 字幕轨 raw=${descriptions.map { it.description() }} → $names")
             subtitleNames = names
             listeners.forEach { it.onSubtitleTracks(names) }
         }

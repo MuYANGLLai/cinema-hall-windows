@@ -16,14 +16,13 @@ import java.awt.Rectangle
 import java.awt.Window
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
-import java.awt.event.MouseEvent
 import javax.swing.JWindow
 import javax.swing.SwingUtilities
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * 悬浮控制栏（2026-11-07 用户口径：控制条要**浮在画面上**，2.5 秒无操作自动收回）。
+ * 悬浮控制栏（用户口径：控制条要**浮在画面上**，鼠标一停就收回去）。
  *
  * ── 为什么必须是独立窗口，而不是 Compose 里叠一层 ───────────────────────────
  * 画面挂在 `SwingPanel` 上，而 `SwingPanel` 是 AWT 的 heavyweight `Canvas`
@@ -67,26 +66,35 @@ class PlaybackOverlay(
     private val trackTimer = javax.swing.Timer(TRACK_MS) { syncBounds() }.apply { isRepeats = true }
 
     /**
-     * 鼠标监听走**全局** `AWTEventListener`，而不是往 `Canvas` 上挂 `MouseMotionListener`。
+     * 鼠标「晃一下」的检测走**轮询指针位置**，不依赖鼠标事件投递。
      *
-     * ── 为什么（2026-11-07 实测）──────────────────────────────────────────────
-     * 挂在 `Canvas` 上时一个事件都收不到：Compose 的 `SwingPanel` 把互操作组件放进了
-     * 自己的容器层级，指针虽然在画面正上方，鼠标事件并不投递给那块 `Canvas`
-     * （实测：`--hover-center` 把指针移到画面正中，`poke` 一次都没被调用）。
-     * 全局监听不关心谁消费了事件，只看**指针在屏幕上的位置**，这也正好符合
-     * 「鼠标在画面上动 ⇒ 控制条出来」这条产品语义。
+     * ── 为什么事件靠不住（2026-11-07 用户报「全屏下晃鼠标不出来」）─────────────
+     * 画面是 libVLC 的 `direct3d11` 输出，它在 AWT 的 `Canvas` 里另建了自己的原生
+     * 子窗口。指针压在视频上时，Windows 把鼠标消息投给那个原生窗口，Java 这一侧
+     * （包括全局 `AWTEventListener`）**一个事件都收不到** —— 窗口模式下如果指针
+     * 大部分时间在侧栏上，就表现为「窗口模式好使、全屏不好使」。
+     *
+     * `MouseInfo.getPointerInfo()` 读的是**操作系统光标位置**，谁消费了消息都不影响。
+     * 每 120ms 比一次坐标：动了、而且动的时候在画面矩形里，就把控制条叫出来。
      */
-    private val globalWatch = java.awt.event.AWTEventListener { event ->
-        val mouse = event as? MouseEvent ?: return@AWTEventListener
-        if (rawEvents < 3) {
-            rawEvents++
-            Log.info("[overlay] 鼠标事件#${rawEvents} 指针=${mouse.locationOnScreen} 画面=${videoScreenRect()}")
-        }
-        if (!insideVideo(mouse.locationOnScreen)) return@AWTEventListener
-        poke("awt")
-    }
+    private val hoverPoll = javax.swing.Timer(HOVER_POLL_MS) { pollPointer() }.apply { isRepeats = true }
+    private var lastPointer: Point? = null
+    private var pollLogged = 0
 
-    private var rawEvents = 0
+    private fun pollPointer() {
+        if (disposed) return
+        val p = runCatching { java.awt.MouseInfo.getPointerInfo()?.location }.getOrNull() ?: return
+        val moved = lastPointer != p
+        lastPointer = p
+        if (!moved) return
+        val rect = videoScreenRect()
+        if (pollLogged < 2) {
+            pollLogged++
+            Log.info("[overlay] 指针轮询 指针=$p 画面=$rect 可见=$isVisible")
+        }
+        if (rect == null || !rect.contains(p)) return
+        poke("hover")
+    }
 
     /**
      * 画面在**屏幕**上的矩形。
@@ -137,20 +145,16 @@ class PlaybackOverlay(
     }
 
     /**
-     * 挂上「鼠标一动就出来」的监听（见 [globalWatch] 的说明）。
+     * 开始「鼠标一动就出来」的检测（见 [hoverPoll] 的说明）。
      */
     fun startWatching() {
         if (disposed) return
-        runCatching {
-            java.awt.Toolkit.getDefaultToolkit().addAWTEventListener(
-                globalWatch,
-                java.awt.AWTEvent.MOUSE_MOTION_EVENT_MASK or java.awt.AWTEvent.MOUSE_EVENT_MASK,
-            )
-            Log.info("[overlay] 全局鼠标监听已装上")
-        }.onFailure { Log.warn("[overlay] 全局鼠标监听装不上：${it.message}") }
+        lastPointer = runCatching { java.awt.MouseInfo.getPointerInfo()?.location }.getOrNull()
+        hoverPoll.start()
+        Log.info("[overlay] 指针轮询已启动（${HOVER_POLL_MS}ms）")
     }
 
-    /** 鼠标动一下就出来，并重新开始 2.5 秒计时。 */
+    /** 鼠标动一下就出来，并重新开始计时。 */
     fun poke(reason: String = "manual") {
         if (disposed || broken) return
         val panelShowing = runCatching { video.panel.isShowing }.getOrDefault(false)
@@ -175,7 +179,7 @@ class PlaybackOverlay(
     private var pokes = 0
 
     fun hide() {
-        // 正在拖动进度条 / 菜单还开着：这一次不收，2.5 秒后再说。
+        // 正在拖动进度条 / 菜单还开着：这一次不收，下一轮再说。
         if (shouldStayVisible()) {
             hideTimer.restart()
             return
@@ -186,7 +190,7 @@ class PlaybackOverlay(
     private fun hideNow() {
         hideTimer.stop()
         trackTimer.stop()
-        if (window?.isVisible == true) Log.info("[overlay] 2.5 秒无操作，控制条收回")
+        if (window?.isVisible == true) Log.info("[overlay] ${AUTO_HIDE_MS}ms 无操作，控制条收回")
         runCatching { window?.isVisible = false }
     }
 
@@ -196,9 +200,7 @@ class PlaybackOverlay(
         if (active === this) active = null
         hideTimer.stop()
         trackTimer.stop()
-        runCatching {
-            java.awt.Toolkit.getDefaultToolkit().removeAWTEventListener(globalWatch)
-        }
+        hoverPoll.stop()
         runCatching { window?.let { owner()?.removeComponentListener(ownerWatch) } }
         runCatching { window?.isVisible = false }
         runCatching { window?.dispose() }
@@ -271,9 +273,12 @@ class PlaybackOverlay(
     }
 
     companion object {
-        /** 无操作 2.5 秒自动收回（用户口径）。 */
-        const val AUTO_HIDE_MS = 2_500
+        /** 无操作 1.3 秒自动收回（2026-11-07 用户把 2.5 秒改短）。 */
+        const val AUTO_HIDE_MS = 1_300
         const val TRACK_MS = 200
+
+        /** 指针轮询间隔：够快看得出「在动」，又不会白烧 CPU（8 次/秒）。 */
+        const val HOVER_POLL_MS = 120
         const val FALLBACK_HEIGHT_PX = 104
 
         @Volatile
@@ -291,6 +296,21 @@ class PlaybackOverlay(
             val instance = active ?: return false
             instance.poke("gate")
             return true
+        }
+
+        /**
+         * 门禁：把指针**真的**挪到画面中心，让「指针轮询」这条路自己把它叫出来。
+         *
+         * 这是比 [pokeActive] 更强的验证：`Robot.mouseMove` 改的是操作系统光标，
+         * 之后能不能出现，全看轮询有没有看出来 —— 也就是用户按鼠标时走的同一条路。
+         */
+        fun hoverActiveByRobot(): Boolean {
+            val instance = active ?: return false
+            val rect = instance.videoScreenRect() ?: return false
+            return runCatching {
+                java.awt.Robot().mouseMove(rect.x + rect.width / 2, rect.y + rect.height / 2)
+                true
+            }.getOrDefault(false)
         }
 
         /** 门禁：已经显示且内容量出了高度（说明 Compose 那一侧真的画出东西了）。 */
