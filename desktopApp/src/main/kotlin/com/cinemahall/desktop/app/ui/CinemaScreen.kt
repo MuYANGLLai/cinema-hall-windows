@@ -56,8 +56,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.DialogWindow
-import androidx.compose.ui.window.rememberDialogState
 import com.cinemahall.core.media.MediaCheck
 import com.cinemahall.core.media.MismatchReason
 import com.cinemahall.core.model.Member
@@ -525,16 +523,16 @@ private fun HallPanel(
                         fontWeight = FontWeight.SemiBold,
                         color = colors.ink,
                     )
-                    Spacer(Modifier.width(2.dp))
-                    Text(
-                        "⧉",
-                        color = colors.ink3,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier
+                    Spacer(Modifier.width(6.dp))
+                    // 「复制房间号」是一颗自绘的小图标（原来是 ⧉ 字形，缺字体会变方块）。
+                    Box(
+                        Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .clickable(onClickLabel = "复制房间号") { copyToClipboard(room.roomId) }
-                            .padding(horizontal = 6.dp, vertical = 2.dp),
-                    )
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
+                    ) {
+                        AppIconView(AppIcon.Copy, 15.dp, colors.ink3)
+                    }
                     Spacer(Modifier.weight(1f))
                     Text(
                         signalStateText(signalState),
@@ -605,12 +603,12 @@ private fun HallPanel(
                     VolumeRow(
                         label = "麦克风输入音量",
                         value = callAudio.micVolume,
-                        icon = "🎤",
+                        icon = AppIcon.Mic,
                     ) { module.handler.setMicVolume(it) }
                     VolumeRow(
                         label = "接收音量",
                         value = callAudio.volume,
-                        icon = "🎧",
+                        icon = AppIcon.Headphones,
                     ) { module.handler.setCallVolume(it) }
                 }
 
@@ -708,7 +706,7 @@ private fun HallCard(
 private fun VolumeRow(
     label: String,
     value: Float,
-    icon: String,
+    icon: AppIcon,
     enabled: Boolean = true,
     onChange: (Float) -> Unit,
 ) {
@@ -719,7 +717,7 @@ private fun VolumeRow(
         color = colors.ink2,
     )
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(icon, color = colors.ink2, style = MaterialTheme.typography.bodyMedium)
+        AppIconView(icon, 15.dp, colors.ink2)
         Slider(
             value = value,
             onValueChange = onChange,
@@ -828,11 +826,12 @@ private fun MemberTableRow(
             )
         }
         Box(Modifier.width(MEMBER_MIC_COLUMN), contentAlignment = Alignment.CenterStart) {
-            Text(
-                "🎤",
-                style = MaterialTheme.typography.labelSmall,
-                // 开麦用主色、关麦用灰色：同一枚图标，靠颜色区分状态（安卓端也是这么画的）。
-                color = if (micOn) colors.accent else colors.ink3.copy(alpha = 0.45f),
+            // 开麦用主色、关麦用灰色：同一枚图标，靠颜色区分状态（安卓端也是这么画的）。
+            AppIconView(
+                AppIcon.Mic,
+                13.dp,
+                if (micOn) colors.accent else colors.ink3.copy(alpha = 0.45f),
+                strokeScale = 1.15f,
             )
         }
     }
@@ -1434,13 +1433,13 @@ private fun LibraryPickerDialog(
         }
     }
 
-    DialogWindow(
-        onCloseRequest = onDismiss,
-        state = rememberDialogState(size = DpSize(900.dp, 640.dp)),
+    // 无边框弹窗外壳（2026-11-07 用户口径：弹窗与主窗口同一套外形）。
+    AppDialogWindow(
         title = "从影片库选片",
-        resizable = true,
+        onClose = onDismiss,
+        size = DpSize(900.dp, 640.dp),
     ) {
-        Column(Modifier.fillMaxSize().background(colors.background).padding(16.dp)) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = query,

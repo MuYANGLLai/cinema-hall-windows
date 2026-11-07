@@ -468,10 +468,10 @@ private fun CategorySection(
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.width(10.dp))
-            ActionGlyph("＋", "往这个分类里加影片") { onAddFiles() }
+            AppIconButton(AppIcon.Plus, "往这个分类里加影片") { onAddFiles() }
             if (!category.isDefault) {
-                ActionGlyph("✎", "重命名分类") { onRenameCategory() }
-                ActionGlyph("🗑", "删除分类") { onDeleteCategory() }
+                AppIconButton(AppIcon.Pencil, "重命名分类") { onRenameCategory() }
+                AppIconButton(AppIcon.Trash, "删除分类", tint = colors.danger) { onDeleteCategory() }
             }
             Spacer(Modifier.weight(1f))
         }
@@ -502,19 +502,7 @@ private fun CategorySection(
     }
 }
 
-@Composable
-private fun ActionGlyph(glyph: String, label: String, onClick: () -> Unit) {
-    val colors = LocalCinemaColors.current
-    Text(
-        glyph,
-        color = colors.accent,
-        style = MaterialTheme.typography.bodyMedium,
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .clickable(onClickLabel = label, onClick = onClick)
-            .padding(horizontal = 6.dp, vertical = 2.dp),
-    )
-}
+
 
 /**
  * 一格封面（对齐安卓端截图：横版 16:9 图 + 名字压在图上）。
@@ -597,18 +585,18 @@ private fun CoverTile(
                 .clickable { onToggleSelect() },
             contentAlignment = Alignment.Center,
         ) {
-            if (checked) Text("✓", color = Color.Black, style = MaterialTheme.typography.labelSmall)
+            if (checked) AppIconView(AppIcon.Check, 12.dp, Color.Black, strokeScale = 1.4f)
         }
         Box(Modifier.align(Alignment.TopEnd).padding(4.dp)) {
-            Text(
-                "⋯",
-                color = Color.White,
-                modifier = Modifier
+            Box(
+                Modifier
                     .clip(RoundedCornerShape(6.dp))
                     .background(Color.Black.copy(alpha = 0.45f))
                     .clickable { menu = true }
-                    .padding(horizontal = 6.dp, vertical = 1.dp),
-            )
+                    .padding(horizontal = 5.dp, vertical = 3.dp),
+            ) {
+                AppIconView(AppIcon.More, 14.dp, Color.White)
+            }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 // 播放还留着一条明确入口（点封面已经改成选中，见上面那颗 clickable 的注释）。
                 DropdownMenuItem(

@@ -81,12 +81,18 @@ import java.io.File
 import javax.swing.JFileChooser
 import javax.swing.SwingUtilities
 
-enum class Screen(val label: String, val glyph: String) {
-    Home("首页", "▶"),
-    Cinema("影厅", "◉"),
-    Library("影片库", "▤"),
-    Settings("设置", "⚙"),
-    Diagnostics("诊断", "◎"),
+/**
+ * 导航项。
+ *
+ * `icon` 是**自绘**图标（`AppIcon`），不是 emoji 也不是字体字形 —— 理由见
+ * `DesktopIcons.kt` 里 `AppIcon` 的注释（emoji 是彩色位图、字形会掉成方块）。
+ */
+enum class Screen(val label: String, val icon: AppIcon) {
+    Home("首页", AppIcon.Home),
+    Cinema("影厅", AppIcon.Cinema),
+    Library("影片库", AppIcon.Library),
+    Settings("设置", AppIcon.Settings),
+    Diagnostics("诊断", AppIcon.Diagnostics),
 }
 
 /**
@@ -519,7 +525,11 @@ fun AppRoot(
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(entry.glyph, color = if (selected) colors.accent else colors.ink3)
+                    AppIconView(
+                        entry.icon,
+                        16.dp,
+                        if (selected) colors.accent else colors.ink3,
+                    )
                     Spacer(Modifier.width(10.dp))
                     Text(
                         entry.label,
@@ -674,7 +684,7 @@ private fun HomeScreen(onGoCinema: () -> Unit) {
         // 空位用等宽 Spacer 占着，否则一张卡会横向拉满整屏。
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             EntryCard(
-                entry = HomeEntry("影厅", "创建或加入房间，和对方看同一部片", "◉", onGoCinema),
+                entry = HomeEntry("影厅", "创建或加入房间，和对方看同一部片", AppIcon.Cinema, onGoCinema),
                 modifier = Modifier.weight(1f),
             )
             repeat(4) { Spacer(Modifier.weight(1f)) }
@@ -685,7 +695,7 @@ private fun HomeScreen(onGoCinema: () -> Unit) {
 private class HomeEntry(
     val title: String,
     val caption: String,
-    val glyph: String,
+    val icon: AppIcon,
     val onClick: () -> Unit,
 )
 
@@ -708,7 +718,7 @@ private fun EntryCard(entry: HomeEntry, modifier: Modifier) {
                 .background(colors.accent.copy(alpha = 0.14f)),
             contentAlignment = Alignment.Center,
         ) {
-            Text(entry.glyph, color = colors.accent, style = MaterialTheme.typography.titleMedium)
+            AppIconView(entry.icon, 22.dp, colors.accent)
         }
         Spacer(Modifier.weight(1f))
         Text(entry.title, style = MaterialTheme.typography.titleMedium, color = colors.ink)

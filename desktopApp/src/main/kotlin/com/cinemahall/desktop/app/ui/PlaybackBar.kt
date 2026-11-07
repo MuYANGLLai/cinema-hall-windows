@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.ColorScheme
@@ -230,11 +231,10 @@ fun PlaybackBar(
                         listOf(0.75f, 1f, 1.25f, 1.5f, 2f).forEach { candidate ->
                             val selected = kotlin.math.abs(state.speed - candidate) < 0.01f
                             DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        if (selected) "✓ ${formatSpeedLabel(candidate)}" else formatSpeedLabel(candidate),
-                                    )
-                                },
+                                // 选中的那一档用**自绘对勾**（不是「✓ 」字符串前缀）：前缀只在
+                                // 选中项出现，会把那一行整体右移，一列菜单看着是歪的。
+                                leadingIcon = { CheckSlot(selected) },
+                                text = { Text(formatSpeedLabel(candidate)) },
                                 onClick = {
                                     state.speedMenu = false
                                     state.speed = candidate
@@ -278,6 +278,21 @@ fun PlaybackBar(
     }
 }
 
+/**
+ * 菜单里的「对勾位」：选中画自绘对勾，未选中留同样大的空位。
+ *
+ * 用 `leadingIcon` 而不是给文字加「✓ 」前缀 —— 前缀只在选中项出现，会把那一行
+ * 整体右移，一列菜单看着是歪的。
+ */
+@Composable
+private fun CheckSlot(checked: Boolean) {
+    if (checked) {
+        AppIconView(AppIcon.Check, 14.dp, LocalCinemaColors.current.accent)
+    } else {
+        Spacer(Modifier.size(14.dp))
+    }
+}
+
 private fun formatSpeedLabel(speed: Float): String =
     if (kotlin.math.abs(speed - speed.toInt()) < 0.01f) "${speed.toInt()}×" else "${speed}×"
 
@@ -312,7 +327,8 @@ fun SubtitleMenu(
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             DropdownMenuItem(
-                text = { Text(if (selected < 0) "✓ 关闭字幕" else "关闭字幕") },
+                leadingIcon = { CheckSlot(selected < 0) },
+                text = { Text("关闭字幕") },
                 onClick = {
                     expanded = false
                     target.disableSubtitles()
@@ -321,7 +337,8 @@ fun SubtitleMenu(
             subtitles.forEachIndexed { index, label ->
                 val text = if (label.isBlank()) "字幕 ${index + 1}（未标语言）" else "字幕 ${index + 1}（$label）"
                 DropdownMenuItem(
-                    text = { Text(if (index == selected) "✓ $text" else text) },
+                    leadingIcon = { CheckSlot(index == selected) },
+                    text = { Text(text) },
                     onClick = {
                         expanded = false
                         target.selectSubtitleTrack(index)

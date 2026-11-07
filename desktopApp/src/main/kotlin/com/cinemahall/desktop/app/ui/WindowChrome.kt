@@ -380,3 +380,42 @@ private fun ResizeHandle(
             },
     )
 }
+
+/**
+ * 独立弹窗用的一条自绘标题栏：左边标题，右边一颗「关闭」。
+ *
+ * 弹窗没有「最大化」，所以不画那两颗 —— 与系统对话框的行为一致。
+ * 拖动用的是主窗口同一套屏幕坐标算法（见 [WindowChrome.dragTo]），
+ * 否则弹窗会同样出现「追着自己尾巴跑」。
+ */
+@Composable
+fun DialogTitleBar(chrome: WindowChrome, title: String) {
+    val colors = LocalCinemaColors.current
+    var startPointer by remember { mutableStateOf<Point?>(null) }
+    var startWindow by remember { mutableStateOf<Point?>(null) }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(TITLE_BAR_HEIGHT)
+            .background(colors.surface2)
+            .pointerInput(chrome) {
+                detectDragGestures(
+                    onDragStart = {
+                        startPointer = chrome.pointerOnScreen()
+                        startWindow = chrome.windowLocation()
+                    },
+                    onDragEnd = { chrome.endDrag() },
+                    onDragCancel = { chrome.endDrag() },
+                ) { change, _ ->
+                    change.consume()
+                    chrome.dragTo(startPointer, startWindow, chrome.pointerOnScreen())
+                }
+            },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Spacer(Modifier.width(12.dp))
+        Text(title, style = MaterialTheme.typography.labelSmall, color = colors.ink3)
+        Spacer(Modifier.weight(1f))
+        WindowButton(WindowGlyph.Close, "关闭", danger = true) { chrome.closeFromTitleBar() }
+    }
+}
