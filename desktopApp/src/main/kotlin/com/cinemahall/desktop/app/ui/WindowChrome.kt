@@ -27,6 +27,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
@@ -79,13 +81,20 @@ class WindowChrome(
     /** 原生接管时，最大化可能由系统发起（贴边吸附 / 双击 / Win+↑），得跟着刷新。 */
     private val zoomWatch = object : java.awt.event.ComponentAdapter() {
         override fun componentResized(e: java.awt.event.ComponentEvent) {
-            if (nativeFrame) maximized = NativeFrame.isZoomed(window)
+            if (!nativeFrame) return
+            maximized = NativeFrame.isZoomed(window)
+            // 内容层（Compose 的 `SunAwtCanvas`）如果被重建，钩子会跟着旧 HWND 走掉，
+            // 于是又变成「拖不动」。这里顺手补一次体检（已接过的不重复装）。
+            NativeFrame.rehookChildren(window)
         }
     }
 
     init {
         window.addComponentListener(zoomWatch)
     }
+
+    /** 等子窗口建出来的那条定时器（见 [watchChildren]）。 */
+    private var childWatch: javax.swing.Timer? = null
 
     /**
      * 让 Windows 接管这个窗口的交互（见 [NativeFrame] 的说明）。
@@ -116,15 +125,44 @@ class WindowChrome(
         if (ok) {
             maximized = NativeFrame.isZoomed(window)
             Log.info("[native] 窗口交互已交给系统：${NativeFrame.describe(window)}")
-            Log.info("[native] 命中测试 ${NativeFrame.probe(window)}")
+            watchChildren()
+            Log.info("[native] 命中测试（父窗口）${NativeFrame.probe(window)}")
         } else {
             Log.warn("[native] 没装上，继续用自绘拖动/缩放")
         }
         return ok
     }
 
+    /**
+     * 等 Compose 把内容层（`SunAwtCanvas` 子窗口）建出来再接管它的命中测试。
+     *
+     * 装钩子那一刻子窗口还不存在（实测：装完立刻查是「无子窗口」），所以这里用一条
+     * 120ms 的 Swing 定时器连续补，接上就停 —— 最多 3 秒。
+     */
+    private fun watchChildren() {
+        childWatch?.stop()
+        var ticks = 0
+        var reported = false
+        var timer: javax.swing.Timer? = null
+        timer = javax.swing.Timer(120) {
+            ticks++
+            NativeFrame.rehookChildren(window)
+            val hooked = NativeFrame.childHooked(window)
+            if (hooked && !reported) {
+                reported = true
+                // 真正能判死的那一行：内容层接上之后，子窗口必须回 HTTRANSPARENT。
+                Log.info("[native] 命中测试（内容层接上之后）${NativeFrame.probe(window)}")
+            }
+            if (hooked || ticks >= 25) timer?.stop()
+        }
+        timer.start()
+        childWatch = timer
+    }
+
     /** 窗口销毁前必须调（弹窗尤其：回调悬空会让进程崩）。 */
     fun disposeNative() {
+        childWatch?.stop()
+        childWatch = null
         window.removeComponentListener(zoomWatch)
         NativeFrame.uninstall(window)
         nativeFrame = false
@@ -336,22 +374,67 @@ fun DesktopTitleBar(chrome: WindowChrome, title: String) {
     }
 }
 
-private enum class WindowGlyph { Minimize, Maximize, Restore, Close }
+private enum class WindowGlyph(val glyph: String) {
+    // 码位直接取自 Windows 自己的图标字体：最小化 / 最大化 / 还原 / 关闭。
+    // Win11 的 Segoe Fluent Icons 与 Win10 的 Segoe MDL2 Assets 用的是同一组码位，
+    // 所以换字体也不影响这三颗的外观。
+    Minimize("\uE921"),
+    Maximize("\uE922"),
+    Restore("\uE923"),
+    Close("\uE8BB"),
+}
+
+/**
+ * Windows 的图标字体（`Segoe Fluent Icons` → `Segoe MDL2 Assets`）。
+ *
+ * ── 为什么用字体而不是自绘（用户 2026-11-07 定版）─────────────────────────────
+ * 用户要的是「跟 Windows 一样的三键外观」。那三条线看着简单，但粗细、端点、留白
+ * 都是微软在这套字体里调过的 —— 手画的等宽线在 100% 缩放下就是「细一点、短一点」，
+ * 一眼看得出来不是系统的。所以直接让系统字体来画：**像素级同源**。
+ *
+ * 两个字体都取不到（正常情况下不会：Win10/11 都自带 MDL2）才退回自绘形状，
+ * 保证按钮不会变成方块或空白。
+ */
+private val captionIconTypeface: org.jetbrains.skia.Typeface? by lazy {
+    val windows = System.getenv("WINDIR") ?: "C:\\Windows"
+    // ① 先按家族名问字体管理器（拿到的是系统那份，DPI 缩放由 Skia 自己处理）；
+    // ② 名字查不到就直接读字体文件（`Fonts\SegoeIcons.ttf` / `segmdl2.ttf`）。
+    val candidates = listOf("Segoe Fluent Icons" to "SegoeIcons.ttf", "Segoe MDL2 Assets" to "segmdl2.ttf")
+    for ((name, file) in candidates) {
+        val typeface = runCatching {
+            org.jetbrains.skia.FontMgr.default.matchFamilyStyle(name, org.jetbrains.skia.FontStyle.NORMAL)
+        }.getOrNull() ?: runCatching {
+            val path = java.io.File(windows, "Fonts\\$file")
+            if (path.isFile) org.jetbrains.skia.FontMgr.default.makeFromFile(path.absolutePath) else null
+        }.getOrNull()
+        if (typeface == null) continue
+        // `matchFamilyStyle` 对不存在的名字可能回一个默认字体（字形全变豆腐块），
+        // 所以还要核一个真实码位，确认这套字体真有标题栏字形。
+        if (org.jetbrains.skia.Font(typeface, 12f).getUTF32Glyph(0xE921) == 0.toShort()) continue
+        Log.info("[ui] 标题栏图标字体：${typeface.familyName}")
+        return@lazy typeface
+    }
+    Log.warn("[ui] 没找到 Windows 图标字体，标题栏三键退回自绘形状")
+    null
+}
+
+/** 图标画布边长（dp）：与系统一样，字形本身约 10dp，外面留白。 */
+private val CAPTION_GLYPH_BOX = 14.dp
+
+/** 字号（dp）。系统标题栏这三颗字形在这个尺寸下与 Win11 一致。 */
+private val CAPTION_GLYPH_SIZE = 10.dp
 
 /**
  * Windows 11 标题栏按钮（外观与悬浮态都是复刻的）。
  *
  * ── 复刻到的细节（用户 2026-11-07 点名要「外观 + hover 的样子」）────────────
- * 1. **46×32 的方块**，图标居中，宽度与系统一致（`CAPTION_BUTTON_DP`）。
+ * 1. **46×32 的方块**，字形居中，宽度与系统一致（`CAPTION_BUTTON_DP`）。
  * 2. **静止态没有底色**；悬浮（hover）时铺一层淡色：最小化/最大化用**白色 12%**
  *    （深色主题下的系统取值），关闭键用 **`#C42B1C`** 的实心红。
  * 3. **按下态**比悬浮态更暗一档（白 7% / 红压到 `#9B1A12`），松手才触发动作 ——
  *    和系统一样「按下不算数，松手且仍在这个按钮上才算」。
  * 4. 关闭键悬浮时**图标转白**；其余两颗的图标本来就是近白色。
  * 5. 光标是**默认箭头**，不是手型 —— 系统标题栏按钮就是这样。
- *
- * 图标**自绘**而不是用字体字形：Segoe Fluent Icons 在部分机器上没装，
- * 那时会显示成方块；而这几条线用 `Canvas` 画出来在任何机器上都一样。
  */
 @Composable
 private fun WindowButton(glyph: WindowGlyph, label: String, danger: Boolean = false, onClick: () -> Unit) {
@@ -404,55 +487,90 @@ private fun WindowButton(glyph: WindowGlyph, label: String, danger: Boolean = fa
             },
         contentAlignment = Alignment.Center,
     ) {
-        Canvas(Modifier.size(10.dp)) {
-            val w = size.width
-            val h = size.height
-            val stroke = 1f
-            when (glyph) {
-                WindowGlyph.Minimize -> drawLine(
-                    color = glyphTint,
-                    start = androidx.compose.ui.geometry.Offset(w * 0.1f, h * 0.5f),
-                    end = androidx.compose.ui.geometry.Offset(w * 0.9f, h * 0.5f),
-                    strokeWidth = stroke,
-                )
+        CaptionGlyph(glyph, glyphTint)
+    }
+}
 
-                WindowGlyph.Maximize -> drawRect(
-                    color = glyphTint,
-                    topLeft = androidx.compose.ui.geometry.Offset(w * 0.1f, h * 0.1f),
-                    size = androidx.compose.ui.geometry.Size(w * 0.8f, h * 0.8f),
-                    style = Stroke(width = stroke),
-                )
-
-                WindowGlyph.Restore -> {
-                    drawRect(
-                        color = glyphTint,
-                        topLeft = androidx.compose.ui.geometry.Offset(w * 0.28f, h * 0.1f),
-                        size = androidx.compose.ui.geometry.Size(w * 0.62f, h * 0.62f),
-                        style = Stroke(width = stroke),
-                    )
-                    drawRect(
-                        color = glyphTint,
-                        topLeft = androidx.compose.ui.geometry.Offset(w * 0.1f, h * 0.28f),
-                        size = androidx.compose.ui.geometry.Size(w * 0.62f, h * 0.62f),
-                        style = Stroke(width = stroke),
-                    )
+/**
+ * 画一颗标题栏字形。
+ *
+ * 有系统图标字体就用字体（像素同源）；取不到才退回等宽自绘线。
+ * 两个分支都画在同一个 [CAPTION_GLYPH_BOX] 里，所以换分支不会让按钮跳位。
+ */
+@Composable
+private fun CaptionGlyph(glyph: WindowGlyph, tint: Color) {
+    Canvas(Modifier.size(CAPTION_GLYPH_BOX)) {
+        val typeface = captionIconTypeface
+        if (typeface != null) {
+            val font = org.jetbrains.skia.Font(typeface, CAPTION_GLYPH_SIZE.toPx())
+            runCatching {
+                val line = org.jetbrains.skia.TextLine.make(glyph.glyph, font)
+                val paint = org.jetbrains.skia.Paint().apply {
+                    color = tint.toArgb()
+                    isAntiAlias = true
                 }
-
-                WindowGlyph.Close -> {
-                    drawLine(
-                        color = glyphTint,
-                        start = androidx.compose.ui.geometry.Offset(w * 0.1f, h * 0.1f),
-                        end = androidx.compose.ui.geometry.Offset(w * 0.9f, h * 0.9f),
-                        strokeWidth = stroke,
-                    )
-                    drawLine(
-                        color = glyphTint,
-                        start = androidx.compose.ui.geometry.Offset(w * 0.9f, h * 0.1f),
-                        end = androidx.compose.ui.geometry.Offset(w * 0.1f, h * 0.9f),
-                        strokeWidth = stroke,
-                    )
-                }
+                // 按**行盒**居中：`ascent` 是负数，基线 = 盒顶 - ascent。
+                val x = (size.width - line.width) / 2f
+                val y = (size.height - line.height) / 2f - line.ascent
+                drawContext.canvas.nativeCanvas.drawTextLine(line, x, y, paint)
+                return@Canvas
             }
+        }
+        drawFallbackGlyph(glyph, tint, size.width, size.height)
+    }
+}
+
+/** 没有图标字体时的退路：等宽线条（形状对得上，只是不如字体细腻）。 */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawFallbackGlyph(
+    glyph: WindowGlyph,
+    color: Color,
+    w: Float,
+    h: Float,
+) {
+    val stroke = 1f
+    when (glyph) {
+        WindowGlyph.Minimize -> drawLine(
+            color = color,
+            start = androidx.compose.ui.geometry.Offset(w * 0.1f, h * 0.5f),
+            end = androidx.compose.ui.geometry.Offset(w * 0.9f, h * 0.5f),
+            strokeWidth = stroke,
+        )
+
+        WindowGlyph.Maximize -> drawRect(
+            color = color,
+            topLeft = androidx.compose.ui.geometry.Offset(w * 0.1f, h * 0.1f),
+            size = androidx.compose.ui.geometry.Size(w * 0.8f, h * 0.8f),
+            style = Stroke(width = stroke),
+        )
+
+        WindowGlyph.Restore -> {
+            drawRect(
+                color = color,
+                topLeft = androidx.compose.ui.geometry.Offset(w * 0.28f, h * 0.1f),
+                size = androidx.compose.ui.geometry.Size(w * 0.62f, h * 0.62f),
+                style = Stroke(width = stroke),
+            )
+            drawRect(
+                color = color,
+                topLeft = androidx.compose.ui.geometry.Offset(w * 0.1f, h * 0.28f),
+                size = androidx.compose.ui.geometry.Size(w * 0.62f, h * 0.62f),
+                style = Stroke(width = stroke),
+            )
+        }
+
+        WindowGlyph.Close -> {
+            drawLine(
+                color = color,
+                start = androidx.compose.ui.geometry.Offset(w * 0.1f, h * 0.1f),
+                end = androidx.compose.ui.geometry.Offset(w * 0.9f, h * 0.9f),
+                strokeWidth = stroke,
+            )
+            drawLine(
+                color = color,
+                start = androidx.compose.ui.geometry.Offset(w * 0.9f, h * 0.1f),
+                end = androidx.compose.ui.geometry.Offset(w * 0.1f, h * 0.9f),
+                strokeWidth = stroke,
+            )
         }
     }
 }

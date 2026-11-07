@@ -57,6 +57,9 @@ internal object NativeFrame {
     private const val GWL_STYLE = -16
     private const val GWL_WNDPROC = -4
 
+    private const val GW_CHILD = 5
+    private const val GW_HWNDNEXT = 2
+
     private const val WS_THICKFRAME = 0x00040000L
     private const val WS_CAPTION = 0x00C00000L
     private const val WS_SYSMENU = 0x00080000L
@@ -70,10 +73,23 @@ internal object NativeFrame {
     private const val SWP_FRAMECHANGED = 0x0020
 
     private const val WM_GETMINMAXINFO = 0x0024
+    private const val WM_SETCURSOR = 0x0020
     private const val WM_NCCALCSIZE = 0x0083
     private const val WM_NCHITTEST = 0x0084
+    private const val WM_NCLBUTTONDOWN = 0x00A1
+    private const val WM_NCLBUTTONDBLCLK = 0x00A3
     private const val WM_SYSCOMMAND = 0x0112
     private const val WM_DPICHANGED = 0x02E0
+
+    /**
+     * 「这块不算我的」——命中测试交给同线程下面的那个窗口（这里是父窗口）。
+     *
+     * ⚠️ 这个值是让整套方案成立的关键，见 [install] 里对子窗口的处理：
+     * Compose 的 `SunAwtCanvas` 子窗口铺满整个客户区，鼠标永远落在它身上；
+     * 只有让它对「标题栏 / 缩放边」回 `HTTRANSPARENT`，系统才会转而问父窗口，
+     * 我们写在父窗口上的 `HTCAPTION` 才真的有用。
+     */
+    private const val HTTRANSPARENT = -1
 
     private const val HTCLIENT = 1
     private const val HTCAPTION = 2
@@ -90,8 +106,16 @@ internal object NativeFrame {
     const val SC_MAXIMIZE = 0xF030
     const val SC_RESTORE = 0xF120
     const val SC_CLOSE = 0xF060
+    private const val SC_MOVE = 0xF010
+    private const val SC_SIZE = 0xF000
 
     private const val MONITOR_DEFAULTTONEAREST = 2
+
+    // 系统光标（`IDC_*`）：`LoadCursorW` 用 `MAKEINTRESOURCE` 语义，直接把数字当指针传。
+    private const val IDC_SIZENWSE = 32642
+    private const val IDC_SIZENESW = 32643
+    private const val IDC_SIZEWE = 32644
+    private const val IDC_SIZENS = 32645
 
     // ── user32 ───────────────────────────────────────────────────────────────
     internal interface User32 : Library {
@@ -111,6 +135,10 @@ internal object NativeFrame {
         fun MonitorFromWindow(hWnd: Pointer?, flags: Int): Pointer?
         fun GetMonitorInfoW(monitor: Pointer?, info: Pointer?): Boolean
         fun GetDpiForWindow(hWnd: Pointer?): Int
+        fun ReleaseCapture(): Boolean
+        fun GetClientRect(hWnd: Pointer?, rect: Pointer?): Boolean
+        fun LoadCursorW(hInstance: Pointer?, name: Pointer?): Pointer?
+        fun SetCursor(cursor: Pointer?): Pointer?
     }
 
     internal interface EnumProc : Callback {
@@ -158,10 +186,32 @@ internal object NativeFrame {
          */
         @Volatile
         var fullscreen: Boolean = false
+
+        /** 拖动/缩放第一次被接管时各打一行日志：门禁与真机排障都靠它。 */
+        @Volatile
+        var loggedMove: Boolean = false
+
+        @Volatile
+        var loggedSize: Boolean = false
     }
 
     private val installed = java.util.concurrent.ConcurrentHashMap<Pointer, Installed>()
     private val byWindow = java.util.concurrent.ConcurrentHashMap<Window, Installed>()
+
+    /**
+     * 盖在客户区上的子窗口（Compose 的 `SunAwtCanvas`）的钩子。
+     *
+     * 它只做两件事：把「标题栏 / 缩放边」的命中测试回 `HTTRANSPARENT` 让给父窗口，
+     * 以及在这些位置上换成对应的缩放光标。其余消息一律原样交回。
+     */
+    private class ChildHook(
+        val hwnd: Pointer,
+        val parent: Installed,
+        var oldProc: Pointer?,
+        val proc: WndProc,
+    )
+
+    private val children = java.util.concurrent.ConcurrentHashMap<Pointer, ChildHook>()
 
     /**
      * 总开关。`--native-frame=0` 在 `main()` 里把它关掉，[install] 随即返回 false，
@@ -230,6 +280,7 @@ internal object NativeFrame {
                     SWP_NOMOVE or SWP_NOSIZE or SWP_NOZORDER or SWP_NOACTIVATE or SWP_FRAMECHANGED,
                 )
             }
+            hookChildren(api, record)
             true
         }.getOrElse { error ->
             Log.warn("[native] 装配原生交互失败，退回自绘：${error.message}")
@@ -237,11 +288,130 @@ internal object NativeFrame {
         }
     }
 
+    /**
+     * 接管「盖满客户区」的子窗口（Compose 的 `SunAwtCanvas`）。
+     *
+     * ── 为什么非要这一层（2026-11-07 实测，踩了一整轮）─────────────────────────
+     * 只给顶层窗口写 `HTCAPTION` 是**完全无效**的：Compose Desktop 的内容挂在
+     * 一个 `SunAwtCanvas` 子窗口上，它铺满整个客户区（实测 1440×920 与客户区一致），
+     * 鼠标永远落在子窗口身上 —— 系统问的是**子窗口**，父窗口的命中测试从头到尾
+     * 没被调用过。表现就是「三键能点（那是界面画的），标题栏拖不动」。
+     * （我当时用 `SendMessage(WM_NCHITTEST)` 自检还得出「分区正确」的假结论：
+     * 那等于自己问自己，绕过了系统真实的命中测试路径。）
+     *
+     * 正解：子窗口对**不属于界面**的那些位置回 `HTTRANSPARENT`，系统会顺着同线程
+     * 继续问父窗口，父窗口的 `HTCAPTION` / `HTLEFT`… 这才生效。
+     */
+    private fun hookChildren(api: User32, record: Installed) {
+        val client = record.rect
+        if (!api.GetClientRect(record.hwnd, client)) return
+        val clientW = client.getInt(8)
+        val clientH = client.getInt(12)
+        if (clientW <= 0 || clientH <= 0) return
+
+        var child = api.GetWindow(record.hwnd, GW_CHILD)
+        var guard = 0
+        while (child != null && guard++ < 32) {
+            val next = api.GetWindow(child, GW_HWNDNEXT)
+            hookChild(api, record, child, clientW, clientH)
+            child = next
+        }
+    }
+
+    private fun hookChild(api: User32, parent: Installed, child: Pointer, clientW: Int, clientH: Int) {
+        if (children.containsKey(child)) return
+        if (!api.IsWindowVisible(child)) return
+        val rect = parent.rect
+        if (!api.GetWindowRect(child, rect)) return
+        val w = rect.getInt(8) - rect.getInt(0)
+        val h = rect.getInt(12) - rect.getInt(4)
+        // 只接管「几乎盖满客户区」的那个（其余子窗口不参与命中测试，动了反而危险）。
+        if (w * 100 < clientW * 90 || h * 100 < clientH * 90) return
+
+        lateinit var hook: ChildHook
+        val impl = object : WndProc {
+            override fun callback(hWnd: Pointer?, msg: Int, wParam: Long, lParam: Long): Long {
+                val self = hook
+                val answer = runCatching { childAnswer(api, self, msg, lParam) }.getOrNull()
+                if (answer != null) return answer
+                return api.CallWindowProcW(self.oldProc, hWnd, msg, wParam, lParam)
+            }
+        }
+        hook = ChildHook(child, parent, null, impl)
+        val ptr = com.sun.jna.CallbackReference.getFunctionPointer(impl)
+        hook.oldProc = Pointer(api.SetWindowLongPtrW(child, GWL_WNDPROC, Pointer.nativeValue(ptr)))
+        children[child] = hook
+        Log.info("[native] 已接管铺满客户区的子窗口 $child（命中测试让给父窗口）")
+    }
+
+    /**
+     * 子窗口要抢答的消息。返回 null = 不归我管，交回子窗口原来的 WndProc。
+     */
+    private fun childAnswer(api: User32, self: ChildHook, msg: Int, lParam: Long): Long? = when (msg) {
+        // 标题栏 / 缩放边：让系统去问父窗口。
+        WM_NCHITTEST -> {
+            val hit = hitTest(api, self.parent, lParam)
+            if (hit != null && hit != HTCLIENT) HTTRANSPARENT.toLong() else null
+        }
+
+        // 光标：边缘要显示缩放箭头。不接管的话 AWT 的 Canvas 一律给箭头，
+        // 用户看到「能拉但没提示」，会以为不能拉。
+        WM_SETCURSOR -> when (hitUnderCursor(api, self.parent)) {
+            HTLEFT, HTRIGHT -> setCursor(api, IDC_SIZEWE)
+            HTTOP, HTBOTTOM -> setCursor(api, IDC_SIZENS)
+            HTTOPLEFT, HTBOTTOMRIGHT -> setCursor(api, IDC_SIZENWSE)
+            HTTOPRIGHT, HTBOTTOMLEFT -> setCursor(api, IDC_SIZENESW)
+            else -> null
+        }
+
+        else -> null
+    }
+
+    private fun setCursor(api: User32, id: Int): Long? = runCatching {
+        val cursor = api.LoadCursorW(null, Pointer(id.toLong())) ?: return null
+        api.SetCursor(cursor)
+        1L
+    }.getOrNull()
+
+    /** 指针此刻落在父窗口的哪个部位（没有指针信息就返回 `null`）。 */
+    private fun hitUnderCursor(api: User32, parent: Installed): Int? {
+        val pt = recordPoint
+        if (!api.GetCursorPos(pt)) return null
+        val x = pt.getInt(0)
+        val y = pt.getInt(4)
+        val lParam = ((y and 0xFFFF).toLong() shl 16) or (x and 0xFFFF).toLong()
+        return hitTest(api, parent, lParam)
+    }
+
+    /** 给 `GetCursorPos` 用的临时缓冲（只在 UI 线程上用，复用即可）。 */
+    private val recordPoint = com.sun.jna.Memory(8)
+
+    /** 窗口尺寸变化后补一次子窗口体检（Compose 会在某些路径上重建内容层）。 */
+    fun rehookChildren(window: Window) {
+        val api = user32 ?: return
+        val record = byWindow[window] ?: return
+        runCatching { hookChildren(api, record) }
+    }
+
+    /** 已经接管到铺满客户区的子窗口了吗（装钩子之后它才被创建，所以要轮询几次）。 */
+    fun childHooked(window: Window): Boolean {
+        val record = byWindow[window] ?: return false
+        return children.values.any { it.parent === record }
+    }
+
     /** 窗口销毁前必须解挂：把旧 WndProc 换回去，否则回调悬空会让进程崩。 */
     fun uninstall(window: Window) {
         val api = user32 ?: return
         val record = byWindow.remove(window) ?: return
         installed.remove(record.hwnd)
+        // 子窗口先解：它们的回调引用了父窗口的 record，留着就是悬空指针。
+        runCatching {
+            children.entries.removeIf { (child, hook) ->
+                if (hook.parent !== record) return@removeIf false
+                hook.oldProc?.let { old -> api.SetWindowLongPtrW(child, GWL_WNDPROC, Pointer.nativeValue(old)) }
+                true
+            }
+        }
         runCatching {
             record.oldProc?.let { old ->
                 api.SetWindowLongPtrW(record.hwnd, GWL_WNDPROC, Pointer.nativeValue(old))
@@ -266,6 +436,41 @@ internal object NativeFrame {
     fun setFullscreen(window: Window, value: Boolean) {
         byWindow[window]?.fullscreen = value
     }
+
+    /**
+     * 进系统的「拖动窗口」循环。
+     *
+     * `SC_MOVE or 2`：低 4 位是方向/来源标记，鼠标发起时要带 `2`（系统标题栏走的也是这个值）。
+     * 这条 `SendMessage` **会一直阻塞到用户松手**，期间系统的模态循环接管一切（含贴边吸附）。
+     */
+    private fun beginSystemMove(api: User32, record: Installed) {
+        if (api.IsZoomed(record.hwnd)) return
+        runCatching {
+            api.ReleaseCapture()
+            api.SendMessageW(record.hwnd, WM_SYSCOMMAND, (SC_MOVE or 0x0002).toLong(), 0)
+            if (!record.loggedMove) {
+                record.loggedMove = true
+                Log.info("[native] 标题栏拖动已由系统接管（SC_MOVE 循环返回，窗口=${windowOf(record)}）")
+            }
+        }.onFailure { Log.warn("[native] 拖动接管失败：${it.message}") }
+    }
+
+    /** 进系统的「拉边改大小」循环。`direction` 取 `WMSZ_LEFT(1)…WMSZ_BOTTOMRIGHT(8)`。 */
+    private fun beginSystemSize(api: User32, record: Installed, direction: Int) {
+        if (!record.spec.resizable || api.IsZoomed(record.hwnd)) return
+        runCatching {
+            api.ReleaseCapture()
+            api.SendMessageW(record.hwnd, WM_SYSCOMMAND, (SC_SIZE or direction).toLong(), 0)
+            if (!record.loggedSize) {
+                record.loggedSize = true
+                Log.info("[native] 拉边缩放已由系统接管（SC_SIZE 方向=$direction）")
+            }
+        }.onFailure { Log.warn("[native] 缩放接管失败：${it.message}") }
+    }
+
+    private fun windowOf(record: Installed): String = runCatching {
+        record.window.bounds.toString()
+    }.getOrElse { "?" }
 
     // ── 门禁用的自检入口 ─────────────────────────────────────────────────────
     /** `hwnd@风格位`，给自检日志用。 */
@@ -298,6 +503,7 @@ internal object NativeFrame {
     fun hitTestName(code: Int): String = when (code) {
         HTCAPTION -> "HTCAPTION(可拖动)"
         HTCLIENT -> "HTCLIENT(交给界面)"
+        HTTRANSPARENT -> "HTTRANSPARENT(让给父窗口)"
         HTLEFT -> "HTLEFT(左缩放)"
         HTRIGHT -> "HTRIGHT(右缩放)"
         HTTOP -> "HTTOP(上缩放)"
@@ -313,11 +519,11 @@ internal object NativeFrame {
      * 门禁：在窗口的几个关键位置各问一次 `WM_NCHITTEST`，拼成一行可核对的结论。
      *
      * ── 为什么必须这样验 ──────────────────────────────────────────────────────
-     * 真鼠标在本机复现不了：`Robot.mouseMove` 挪得动指针，但事件进不了 JVM
-     * （2026-11-07 多次实测），所以「拖标题栏能不能挪窗」没法用自动化点出来。
-     * 而 `SendMessageW(WM_NCHITTEST)` 走的是**真实 WndProc**（含刚装上去的回调），
-     * 返回的 `HT*` 就是用户按下鼠标那一刻 Windows 会拿到的东西 —— 分区对不对，
-     * 这一行就能判死。
+     * 真鼠标在本机复现不了（自动化脚本里 `Robot` 的事件进不到窗口），所以只能直接问。
+     * 但**只问父窗口是不够的**——那样会把「父窗口说 HTCAPTION」当成「拖得动」，
+     * 而真实的鼠标其实落在子窗口上（2026-11-07 就是用这个假判据放过了「拖不动」）。
+     * 所以这里同时问**子窗口**：它必须在标题栏/边缘回 `HTTRANSPARENT`，
+     * 父窗口的答案才有机会生效。
      */
     fun probe(window: Window): String {
         val api = user32 ?: return "user32=null"
@@ -331,17 +537,23 @@ internal object NativeFrame {
         val scale = record.dpi / 96.0
         val barY = top + (record.spec.titleBarDp * scale).toInt() / 2
         val btnWidth = (record.spec.captionButtons * CAPTION_BUTTON_DP * scale).toInt()
+        val child = children.entries.firstOrNull { it.value.parent === record }?.key
+
         fun at(name: String, x: Int, y: Int): String {
-            val code = hitTestAt(window, x, y) ?: return "$name=失败"
-            return "$name=${hitTestName(code)}"
+            val lParam = ((y and 0xFFFF).toLong() shl 16) or (x and 0xFFFF).toLong()
+            val parent = api.SendMessageW(record.hwnd, WM_NCHITTEST, 0, lParam).toInt()
+            val childName = child?.let {
+                hitTestName(api.SendMessageW(it, WM_NCHITTEST, 0, lParam).toInt())
+            } ?: "无子窗口"
+            return "$name=父:${hitTestName(parent)} 子:$childName"
         }
         return listOf(
-            at("标题栏左", left + 40, barY),
+            at("标题栏", left + 40, barY),
             at("按钮区", right - btnWidth / 2, barY),
             at("客户区", left + (right - left) / 2, top + (bottom - top) / 2),
             at("左边缘", left + 2, top + (bottom - top) / 2),
             at("右下角", right - 2, bottom - 2),
-        ).joinToString(" ")
+        ).joinToString("\n                    ")
     }
 
     fun dpiOf(window: Window): Int {
@@ -375,6 +587,45 @@ internal object NativeFrame {
             }
 
             WM_NCHITTEST -> hitTest(api, self, lParam)?.toLong()
+
+            // ── 非客户区按下：自己进系统的移动/缩放循环（2026-11-07 实测必须这么写）──
+            // 只把 `HTCAPTION` 交给系统是不够的：**AWT 的窗口过程把
+            // `WM_NCLBUTTONDOWN` 吃掉了**，`DefWindowProc` 收不到它，
+            // 于是「按下标题栏」什么都不会发生 —— 用户看到的就是「拖不动」。
+            // （实测：注入真实鼠标在标题栏按下并拖动 220px，窗口矩形一动不动。）
+            //
+            // 正解是所有无边框窗口的老办法：先 `ReleaseCapture()`，再自己
+            // `SendMessage(WM_SYSCOMMAND, SC_MOVE|2)`；缩放同理发 `SC_SIZE + 方向`。
+            // 位移、吸附、拖到屏幕顶部最大化、动画全都还在系统手里，我们只是替它
+            // **按下这个键**。返回 0 = 这条消息我们处理完了，不再往 AWT 走。
+            WM_NCLBUTTONDOWN -> when (val hit = wParam.toInt()) {
+                HTCAPTION -> {
+                    beginSystemMove(api, self)
+                    0L
+                }
+
+                in HTLEFT..HTBOTTOMRIGHT -> {
+                    // HTLEFT(10)…HTBOTTOMRIGHT(17) 减 9 正好是 WMSZ_LEFT(1)…WMSZ_BOTTOMRIGHT(8)。
+                    beginSystemSize(api, self, hit - 9)
+                    0L
+                }
+
+                else -> null
+            }
+
+            // 标题栏双击：最大化 / 还原。系统只会把 DBLCLK 发给「自己处理了按下」的窗口，
+            // 上面那条已经把按下接管了，所以这一条必须也自己接。
+            WM_NCLBUTTONDBLCLK -> if (wParam.toInt() == HTCAPTION) {
+                api.SendMessageW(
+                    self.hwnd,
+                    WM_SYSCOMMAND,
+                    (if (api.IsZoomed(self.hwnd)) SC_RESTORE else SC_MAXIMIZE).toLong(),
+                    0,
+                )
+                0L
+            } else {
+                null
+            }
             // 换了显示器/改了缩放比例：只刷缓存，**必须**交回系统去做真正的重排。
             WM_DPICHANGED -> {
                 val dpi = (wParam and 0xFFFF).toInt()
