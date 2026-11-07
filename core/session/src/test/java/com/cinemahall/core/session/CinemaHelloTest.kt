@@ -145,11 +145,32 @@ class CinemaHelloTest {
 
         assertTrue(handler.onPeerChannelOpened(PEER))
 
-        assertEquals(1, messenger.sent.size)
+        // 只看 `hello`：同一次「链路打通」还会发一条 `cinema.call_state`（成员卡片上那枚
+        // 麦克风图标要靠它，见 `CinemaHandler.publishCallState`），那不是 hello，不该被算进来。
+        val hellos = messenger.sent.filter { it.first == CinemaHello.TYPE }
+        assertEquals(1, hellos.size)
         // 阶段二 v2：`hello` 是**定向**消息（契约 §4），`to` 必须是刚打通的那条链路的对端。
         // 广播出去的话，六人房里每个人都会收到每个人的自我介绍，房主的「对端摘要」
         // 会被最后到达的那条覆盖。
-        assertEquals("hello 必须点名发给刚打通的那条链路", PEER, messenger.sent.single().third)
+        assertEquals("hello 必须点名发给刚打通的那条链路", PEER, hellos.single().third)
+    }
+
+    @Test
+    fun `链路打开时补发一次通话状态`() {
+        // 迟到者恢复路径：对方那一刻若已经开着麦，成员卡片必须立刻看到，而不是等我
+        // 下一次动开关。这条同时也锁住「它是定向的」—— 广播会让六人房里互相刷。
+        val messenger = RecordingMessenger()
+        val handler = CinemaHandler(Dispatchers.Unconfined).apply { bindPeerMessenger(messenger) }
+
+        handler.onPeerChannelOpened(PEER)
+
+        val calls = messenger.sent.filter { it.first == CinemaPlayback.TYPE_CALL_STATE }
+        assertEquals(1, calls.size)
+        assertEquals(PEER, calls.single().third)
+        assertEquals(
+            CinemaCallState(callOn = false, micOn = false),
+            CinemaPlaybackCodec.decodeCallState(calls.single().second),
+        )
     }
 
     @Test
@@ -158,7 +179,11 @@ class CinemaHelloTest {
         val handler = CinemaHandler(Dispatchers.Unconfined).apply { bindPeerMessenger(messenger) }
 
         assertFalse(handler.onPeerChannelOpened(PEER))
-        assertTrue(messenger.sent.isEmpty())
+        // 同上：`call_state` 会发，`hello` 不会。
+        assertTrue(
+            "没选文件就不该自我介绍",
+            messenger.sent.none { it.first == CinemaHello.TYPE },
+        )
     }
 
     // ── 「收到 → 出结论」 ──────────────────────────────────────────────────

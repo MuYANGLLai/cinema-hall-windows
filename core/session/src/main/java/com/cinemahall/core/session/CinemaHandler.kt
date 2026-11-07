@@ -205,6 +205,50 @@ class CinemaHandler(
         }
     }
 
+    // ── 「房间成员」卡片上的麦克风图标（2026-11-07）────────────────────────────
+
+    /**
+     * 逐成员的通话状态（[CinemaCallState]）。键不存在 = 还没收到过那个人的 `call_state`，
+     * 按「没开麦」画（见 [CinemaCallState] 的注释：保守的一侧）。
+     *
+     * 为什么这份状态在玩法层而不是 RTC 层：它回答的是「**那个人**开没开麦」，
+     * 而 RTC 层每条链路只知道自己这一端的 `sending/receiving`。对方的状态只能靠
+     * 对方广播过来，玩法层正好有广播口（[messenger]）与成员表。
+     */
+    private val _peerCall = MutableStateFlow<Map<UserId, CinemaCallState>>(emptyMap())
+
+    val peerCall: StateFlow<Map<UserId, CinemaCallState>> = _peerCall
+
+    /**
+     * 本机通话开关的**意图**（最近一次用户请求）。只用来给 [publishCallState] 提供默认值。
+     *
+     * 为什么不直接读 `callAudio.value.requested`：没绑链路时读的是 [idleCallAudio]，
+     * 它的 `requested` 永远是 false（那是「还没有链路」的空状态，不是「用户关了通话」）。
+     * 于是「先开麦、再拖零」会广播出 `callOn=false` —— 对方界面上那枚图标会从
+     * 「麦开着」直接变成「没开通话」，而其实只是静音。
+     *
+     * 真正的权威仍然是 `callAudio`（链路可能自己失败）：这里只回答「我最后一次按的是开」。
+     */
+    @Volatile
+    private var callIntent = false
+
+    /**
+     * 把本机的通话 / 麦克风状态告诉别人。[to] = null 是广播，否则只发给那一个人。
+     *
+     * [callOn] 由调用方显式传：`setCallEnabled` 走的是 `post`（异步），紧跟着读
+     * `callAudio` 拿到的是**上一条**状态 —— 那会让「刚打开通话」广播出 `callOn=false`，
+     * 对方界面上要等到下一次改动才变色。
+     */
+    private fun publishCallState(callOn: Boolean = callIntent, to: UserId? = null) {
+        // 麦克风「开了」= 通了话且发送音量不为 0。音量真值在偏好字段里：链路没建时
+        // `callAudio` 是 idle 流，它带着同一个值（见 [setMicVolume]）。
+        val state = CinemaCallState(
+            callOn = callOn,
+            micOn = callOn && micVolumePreference > 0.001f,
+        )
+        messenger?.send(CinemaPlayback.TYPE_CALL_STATE, CinemaPlaybackCodec.encodeCallState(state), to)
+    }
+
     /**
      * ⚠️ 必须是 `get()`，**不能**在构造时把 `callSource.callAudio` 取出来存着。
      *
@@ -240,7 +284,10 @@ class CinemaHandler(
      */
     fun setCallEnabled(enabled: Boolean, source: String) {
         engine?.noteExternal(if (enabled) "通话开关：开（$source）" else "通话开关：关（$source）")
+        callIntent = enabled
         callSource?.setCallEnabled(enabled)
+        // 先告诉别人「我开了 / 我关了」：成员卡片上那枚麦克风图标靠它。
+        publishCallState(callOn = enabled)
     }
 
     /**
@@ -261,9 +308,14 @@ class CinemaHandler(
      */
     override fun setMicVolume(volume: Float) {
         val clamped = volume.coerceIn(0f, 1f)
+        val wasOn = micVolumePreference > 0.001f
         micVolumePreference = clamped
         idleCallAudio.update { it.copy(micVolume = clamped) }
         callSource?.setMicVolume(clamped)
+        // 只在「开麦 ↔ 静音」这一位翻转时广播：这条回调挂在滑块上，拖一次是几十次，
+        // 每次都发一条会把 DataChannel 塞满（对端那条 UI 也只关心有麦 / 没麦）。
+        val isOn = clamped > 0.001f
+        if (isOn != wasOn) publishCallState()
     }
 
     /** 通话中限制影片音量（§471 兜底开关）。没绑上时是空操作。 */
@@ -425,6 +477,18 @@ class CinemaHandler(
         this.myUserId = myUserId
         applyHost(room)
 
+        // ── 两人房自动同权（2026-11-07 用户口径）──────────────────────────────────
+        // 「房间只有两个人的时候，从端自动获得跟房主一样的控制权限，2 个人以上则收回」。
+        // 判据只有人数，而人数每个客户端都从同一份 `Room.members` 读，所以这是一个
+        // **本地推导**，不需要新协议（理由见 `ControlPolicy.pairAutoAllow`）。
+        // 第三个人进房 → 这一位变 false → 两端同时收回权限，不需要任何人按按钮。
+        val pair = room != null && room.members.size == 2
+        if (pair != pairAutoAllow) {
+            pairAutoAllow = pair
+            // 不广播：这不是房主的裁决，是两端各自算出来的同一个结论。
+            applyControlPolicy(_controlPolicy.value, broadcast = false)
+        }
+
         if (room != null) {
             // 房号变了 = **换了一场会话**，上一场的通话意图不许跟过来（2026-10-12 补）。
             //
@@ -452,6 +516,8 @@ class CinemaHandler(
             // 那是底座在应答路径上直接派发的**事件**，状态流去重不了它。
             if (lastRoomId != room.roomId) setCallEnabled(false)
             lastRoomId = room.roomId
+            // 新的一场：上一场那些「谁开着麦」的读数全部作废（人可能都换了）。
+            if (_peerCall.value.isNotEmpty()) _peerCall.value = emptyMap()
             // 进了房间 ⇒ 这是一场**新的**会话，收尾标记归位（见 [onSessionEnded] 的幂等守卫）。
             sessionEnded = false
             return
@@ -661,6 +727,9 @@ class CinemaHandler(
         // 结论发过去，让他的界面立刻显示「等待」，而不是停在「已连接、什么也没有」。
         if (isHostLocally) publishMediaStatus(peer)
         val hello = sendHello(peer)
+        // 迟到者恢复路径：链路刚通时把本机的通话状态补一次 —— 不然「我早就开麦了」
+        // 要等到我下一次动开关，对方的成员卡片才会亮起麦克风。
+        publishCallState(to = peer)
         engine?.let {
             it.setSessionEpoch(sessionEpoch)
             it.onLinkOpened()
@@ -774,6 +843,8 @@ class CinemaHandler(
             engine?.onPeerUnavailable()
         }
         _members.update { it - userId }
+        // 人走了，那枚麦克风图标也一起消失（他回来会重新发一条 `call_state`）。
+        _peerCall.update { it - userId }
     }
 
     override suspend fun onMessage(action: String, env: Envelope) {
@@ -808,6 +879,13 @@ class CinemaHandler(
                             (status.reason?.let { "（$it）" } ?: ""),
                     )
                 }
+            }
+
+            // 「房间成员」卡片上那枚麦克风图标。任何人都会发（房主也发），
+            // 所以这里**没有**权限判断：它只是一句自我介绍，不是玩法裁决。
+            action == CinemaPlayback.ACTION_CALL_STATE -> {
+                val state = CinemaPlaybackCodec.decodeCallState(env.payload) ?: return
+                _peerCall.update { it + (UserId(env.from) to state) }
             }
 
             // §5.3 的播放动作全部交给引擎。房主 / 从端的分岔在引擎内部
@@ -902,27 +980,40 @@ class CinemaHandler(
     }
 
     private fun applyControlPolicy(policy: ControlPolicy, broadcast: Boolean) {
-        _controlPolicy.value = policy
+        // `pairAutoAllow` 永远以当前房间为准，别让某条入站载荷把它带成 false / true：
+        // 它不上线（见 `ControlPolicy.toWire`），所以收到的载荷里根本没有它。
+        val effective = policy.copy(pairAutoAllow = pairAutoAllow)
+        _controlPolicy.value = effective
         // 引擎只能在它那条线程上被碰（见类注释的线程约定）。这里不 `withContext` 等结果：
         // 调用点在界面上，等它反而会卡一帧。
-        actionScope.launch { onEngineThread { engine?.setControlPolicy(policy) } }
+        actionScope.launch { onEngineThread { engine?.setControlPolicy(effective) } }
         if (broadcast && isHostLocally) {
             messenger?.send(
                 CinemaPlayback.TYPE_CONTROL_POLICY,
-                CinemaPlaybackCodec.encodeControlPolicy(policy.toWire()),
+                CinemaPlaybackCodec.encodeControlPolicy(effective.toWire()),
                 // 广播：所有人都要知道自己的权限（`to` 可空，§4）。
                 null,
             )
             actionScope.launch {
                 onEngineThread {
                     engine?.noteExternal(
-                        "控制策略已更新：defaultAllow=${policy.defaultAllow}、" +
-                            "overrides=${policy.overrides.size}",
+                        "控制策略已更新：defaultAllow=${effective.defaultAllow}、" +
+                            "overrides=${effective.overrides.size}",
                     )
                 }
             }
         }
     }
+
+    /**
+     * 两人房自动同权的那一位（见 [onRoomUpdated] 与 `ControlPolicy.pairAutoAllow`）。
+     *
+     * 单独存一份而不是直接从 `_controlPolicy` 读：`applyControlPolicy` 可能在
+     * `Room` 还没到（或已经变 null）的时候被调用，那时人数是未知的，**不能**把它
+     * 当成「不是两人房」来清掉 —— 一进一出的瞬间会把权限闪一下。
+     */
+    @Volatile
+    private var pairAutoAllow = false
 
     override suspend fun onSessionRestored(room: Room) {
         // 1.3：断线恢复后重建本地视图。角色要跟着重判 —— 服务端可能在这段时间里

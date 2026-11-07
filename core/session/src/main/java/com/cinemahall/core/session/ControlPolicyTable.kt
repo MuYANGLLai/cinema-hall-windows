@@ -20,12 +20,36 @@ import com.cinemahall.core.model.UserId
 data class ControlPolicy(
     val defaultAllow: Boolean = false,
     val overrides: Map<UserId, Boolean> = emptyMap(),
+    /**
+     * 两人房自动同权（2026-11-07 用户口径）。
+     *
+     * > 「房间只有两个人的时候，从端自动获得跟房主一样的控制权限，2 个人以上则收回权限」
+     *
+     * ── 为什么这是一个**本地推导**字段，而不是又一条协议 ─────────────────────────
+     * 它的判据只有「房间里坐了几个人」，而那个数字每个客户端从 `Room.members` 都读得到，
+     * 也必然读到同一个值。为此加一条广播消息，只会多出一条「房主那一份和收到的
+     * 那一份打架」的同步问题 —— 而它本来没有同步问题。
+     *
+     * 因此它**不上线**（见 [toWire]）：`cinema.control_policy` 载荷里没有这个键。
+     * [CinemaHandler] 每次应用策略时都按当前房间重算一遍，所以「第三个人进房」
+     * 那一刻所有客户端的这一位同时变 false —— 权限当场收回，不需要任何人按按钮。
+     *
+     * ⚠️ 它只影响「允不允许控制」，不绕过 [ControlPolicyTable.canControl] 里的
+     * `watching` 判据：本机还没选到同一部片的人，按钮仍然是灰的（那时按下去本来就
+     * 只是一次静默空操作）。
+     */
+    val pairAutoAllow: Boolean = false,
 ) {
 
-    /** 这个人按策略能不能控制（`overrides` 优先，缺省跟随 [defaultAllow]）。 */
-    fun allowedFor(userId: UserId): Boolean = overrides[userId] ?: defaultAllow
+    /** 这个人按策略能不能控制（两人房自动同权 → `overrides` → [defaultAllow]）。 */
+    fun allowedFor(userId: UserId): Boolean =
+        pairAutoAllow || (overrides[userId] ?: defaultAllow)
 
-    /** 线上形态（`overrides` 的键是 userId 字符串）。 */
+    /**
+     * 线上形态（`overrides` 的键是 userId 字符串）。
+     *
+     * [pairAutoAllow] **刻意不带**：它是本地推导出来的，见那个字段的 KDoc。
+     */
     fun toWire(): CinemaControlPolicy = CinemaControlPolicy(
         defaultAllow = defaultAllow,
         overrides = overrides.mapKeys { it.key.value },

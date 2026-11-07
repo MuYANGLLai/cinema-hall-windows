@@ -27,6 +27,15 @@ object CinemaPlayback {
     const val ACTION_CONTROL_POLICY = "control_policy"
     const val ACTION_MEDIA_STATUS = "media_status"
 
+    /**
+     * `cinema.call_state`（2026-11-07 新增）：成员现在有没有开麦。
+     *
+     * 只给「房间成员」卡片上那一枚麦克风图标用。它**不在** [ACTIONS] 里：那个集合
+     * 是「交给同步引擎的播放动作」的分流表，而这条消息属于玩法层的通话域，
+     * 由 `CinemaHandler.onMessage` 自己消化 —— 混进去会让引擎收到一条它不认识的消息。
+     */
+    const val ACTION_CALL_STATE = "call_state"
+
     const val TYPE_PLAY = "cinema.play"
     const val TYPE_PAUSE = "cinema.pause"
     const val TYPE_SEEK = "cinema.seek"
@@ -37,6 +46,7 @@ object CinemaPlayback {
     const val TYPE_SUBTITLE = "cinema.subtitle"
     const val TYPE_CONTROL_POLICY = "cinema.control_policy"
     const val TYPE_MEDIA_STATUS = "cinema.media_status"
+    const val TYPE_CALL_STATE = "cinema.call_state"
 
     /** 动作名 → 完整 type。日志与诊断页用它，避免各处手写字符串。 */
     fun typeOf(action: String): String = "cinema.$action"
@@ -209,6 +219,29 @@ data class CinemaSubtitle(
     val trackIndex: Int,
 )
 
+/**
+ * `cinema.call_state`（2026-11-07）：`{callOn, micOn}` —— 这一台设备此刻的通话与麦克风状态。
+ *
+ * ── 为什么要单独一条消息 ────────────────────────────────────────────────────
+ * 「房间成员」卡片要给每个人画一枚麦克风图标（用户口径），而 `Member` 里只有
+ * 昵称与在线状态 —— 通话是**设备本地**的事，服务端不知道，`sys.members_updated`
+ * 里也没有。声音走的是 WebRTC 的媒体面（DataChannel 之外），所以对方的麦克风
+ * 开没开只能由对方自己说一声。
+ *
+ * ── 两个字段为什么要分开 ────────────────────────────────────────────────────
+ * 开麦 ≠ 打通话：关掉通话只是本机不采集（对端的声音照样能听到，见通话卡片那句注解）。
+ * 只给一个 `micOn` 的话，「他没开麦」与「他压根没开通话」在界面上分不开。
+ *
+ * 缺省（收不到这条消息）一律按「没开麦」解释 —— 那是**保守**的一侧：界面把一个
+ * 正在说话的人画成静音，代价是用户多问一句；反过来把静音的人画成在说话，用户会
+ * 对着麦克风喊半天。
+ */
+@Serializable
+data class CinemaCallState(
+    val callOn: Boolean = false,
+    val micOn: Boolean = false,
+)
+
 object CinemaPlaybackCodec {
 
     /** 与 `CinemaHelloCodec` / `MediaSignatureCodec` 同一取向：未知字段忽略，坏消息不抛。 */
@@ -261,6 +294,12 @@ object CinemaPlaybackCodec {
 
     fun decodeMediaStatus(payload: JsonObject?): CinemaMediaStatus? =
         decode(CinemaMediaStatus.serializer(), payload)
+
+    fun encodeCallState(value: CinemaCallState): JsonObject =
+        encode(CinemaCallState.serializer(), value)
+
+    fun decodeCallState(payload: JsonObject?): CinemaCallState? =
+        decode(CinemaCallState.serializer(), payload)
 
     private fun <T> encode(serializer: KSerializer<T>, value: T): JsonObject =
         json.encodeToJsonElement(serializer, value).jsonObject
