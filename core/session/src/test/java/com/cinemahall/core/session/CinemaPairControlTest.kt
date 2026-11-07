@@ -62,6 +62,28 @@ class CinemaPairControlTest {
     }
 
     @Test
+    fun `两人房里房主关掉某个人_那个人就不许`() {
+        // 2026-11-07 第二版用户口径：「双人房间下改成房主仍可调节成员的控制权限」。
+        // 上一版把两人房写成「一律允许」，房主那一列的开关拨下去没有任何效果。
+        // 现在 `overrides` 优先于 `pairAutoAllow`。
+        val policy = ControlPolicy(pairAutoAllow = true, overrides = mapOf(me to false))
+
+        assertFalse(policy.allowedFor(me))
+        assertFalse(ControlPolicyTable.canControl(policy, host, me, watching = true))
+    }
+
+    @Test
+    fun `两人房里房主可以单独再打开某个人`() {
+        val policy = ControlPolicy(
+            defaultAllow = false,
+            pairAutoAllow = true,
+            overrides = mapOf(me to true),
+        )
+
+        assertTrue(policy.allowedFor(me))
+    }
+
+    @Test
     fun `两人房这一位不上线`() {
         // 判据只有人数，两端各自从同一份 `Room.members` 推出来即可。进了载荷就会变成
         // 「房主那一份 / 收到的那一份」打架 —— 那正是这一条要避免的。

@@ -326,6 +326,10 @@ class PeerCoordinator(
             ?: CallAudioState()
         _callAudio.value = measured.copy(
             requested = callIntent,
+            // 音量与麦克风是**用户偏好**，与 `requested` 同一档：链路只报测量值，
+            // 这里一律以本层记着的意图为准（没有链路时界面读的也是它）。
+            volume = callVolumeIntent,
+            micVolume = micVolumeIntent,
             sending = all.any { it.sending },
             receiving = all.any { it.receiving },
             remoteSending = when {
@@ -381,7 +385,29 @@ class PeerCoordinator(
      * 当前值在通话状态的 `volume` 字段里，诊断面板读那里。
      */
     override fun setCallVolume(volume: Float) {
-        for (link in _links.value.values) link.setCallVolume(volume)
+        val clamped = volume.coerceIn(0f, 1f)
+        callVolumeIntent = clamped
+        for (link in _links.value.values) link.setCallVolume(clamped)
+        // 立即重算一次发布值：**一条链路都没有时**（刚进房 / 单人调试）界面读的就是
+        // 这一份。少了它，滑块会停在链路上报的默认值上，看着像「拖不动」。
+        publishCallAudio()
+    }
+
+    /**
+     * 麦克风**发送**音量。
+     *
+     * ── 为什么必须有这个方法（2026-11-07 用户报「麦克风输入控制条仍不可调节」）──────
+     * `CallAudio.setMicVolume` 在接口上带默认空实现（`= Unit`），而本类之前**没有覆写它**。
+     * 于是 `CinemaHandler.setMicVolume` 下发的值在这一层被静默吞掉：
+     * 链路永远收不到、`publishCallAudio` 又从链路上报的读数里取值，
+     * 界面读回 100% ⇒ 松手就弹回去，看起来就是「这根条不可调节」。
+     * 与 [setCallVolume] 同一条规矩：**意图存在本层**，链路只报测量值。
+     */
+    override fun setMicVolume(volume: Float) {
+        val clamped = volume.coerceIn(0f, 1f)
+        micVolumeIntent = clamped
+        for (link in _links.value.values) link.setMicVolume(clamped)
+        publishCallAudio()
     }
 
     /**
@@ -411,9 +437,24 @@ class PeerCoordinator(
      * 开关明明是开着的（它读的是主链路的状态，主链路是别人）。
      */
     private val _callIntent = MutableStateFlow(false)
-
     /** 房间级意图的真值（[publishCallAudio] 与 [startLink] 都读它）。 */
     private val callIntent: Boolean get() = _callIntent.value
+
+    /**
+     * 通话音量的**用户偏好**（0..1）。与 [callIntent] 同一档：它是房间级的意图，
+     * 新链路建起来时要照它下发（否则「先调好 30%、后有人进房」那条路上新对端是满音量）。
+     */
+    @Volatile
+    private var callVolumeIntent: Float = CallAudioState.DEFAULT_VOLUME
+
+    /**
+     * 麦克风发送音量的用户偏好（0..1）。同上。
+     *
+     * ⚠️ 这个字段存在本身就是一次缺陷的证据：`CallAudio.setMicVolume` 有默认空实现，
+     * 本类此前没覆写它 ⇒ 界面拖的每一个值都在这一层蒸发（见 [setMicVolume]）。
+     */
+    @Volatile
+    private var micVolumeIntent: Float = 1f
 
     /**
      * 上一次**由本层下达**的通话意图，只用于去重日志。
@@ -1000,6 +1041,9 @@ class PeerCoordinator(
         // 房间级的通话意图要跟着新链路走：没有这一句，「先按开麦、后有人进房」
         // 那条路上新对端永远听不见（而界面上的开关是开着的，因为它读的是主链路）。
         if (callIntent) link.setCallEnabled(true)
+        // 音量同一条理由：新链路默认是 100% / 默认值，而用户可能早就调过。
+        link.setCallVolume(callVolumeIntent)
+        link.setMicVolume(micVolumeIntent)
         // 新链路一登记就重算一次：`primary` 可能换了人，按钮读的聚合状态要跟着换。
         publishCallAudio()
         if (_relayOnly.value) link.setTransportPolicy(TransportPolicy.RELAY_ONLY)

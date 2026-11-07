@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -214,6 +215,55 @@ class PeerCoordinatorCallTest {
         assertEquals("对端没来不等于会话结束", closedAtStart, rtc.closed)
     }
 
+    /**
+     * 麦克风音量**必须下发给链路**，并且界面读回的聚合值就是它。
+     *
+     * 2026-11-07 用户报「麦克风输入控制条仍不可调节」：`CallAudio.setMicVolume` 在接口上
+     * 带默认空实现，而本类当时没有覆写 —— 界面拖的每一个值在这一层蒸发，
+     * `publishCallAudio` 又从链路读数里取值，于是滑块松手就弹回 100%。
+     *
+     * 这条用例同时钉住「没有链路时也读得到意图」：单人调试/刚进房那一刻界面读的是
+     * 本层发布值，它必须跟着用户的手走。
+     */
+    @Test
+    fun 麦克风音量下发到链路并回读到界面() = runBlocking {
+        val rtc = FakePeerLink()
+        val signaler = FakeSignaler()
+        val coordinator = newCoordinator(rtc, signaler)
+        bindPeer(coordinator, signaler)
+        // 建链那一刻会先把默认值（100%）下发一次，那一条不属于本用例。
+        rtc.micVolumes.clear()
+
+        coordinator.setMicVolume(0.3f)
+
+        assertEquals("链路要真的收到", listOf(0.3f), rtc.micVolumes)
+        assertEquals("界面读的聚合值也要跟着变", 0.3f, coordinator.callAudio.value.micVolume)
+
+        // 出房（收链路）之后仍然读得到 —— 那是用户偏好，不是链路状态。
+        signaler.room.value = null
+        assertEquals(0.3f, coordinator.callAudio.value.micVolume)
+    }
+
+    /**
+     * 新链路上要自动带上用户早就调好的音量（先调音量、后有人进房）。
+     */
+    @Test
+    fun 新链路建起来时带上已调过的音量() = runBlocking {
+        val rtc = FakePeerLink()
+        val signaler = FakeSignaler()
+        val coordinator = newCoordinator(rtc, signaler)
+
+        // 还没有链路：只记意图。
+        coordinator.setMicVolume(0.35f)
+        coordinator.setCallVolume(0.5f)
+        assertTrue(rtc.micVolumes.isEmpty())
+
+        bindPeer(coordinator, signaler)
+
+        assertEquals(listOf(0.35f), rtc.micVolumes)
+        assertEquals(listOf(0.5f), rtc.volumes)
+    }
+
     // ── 脚手架 ──────────────────────────────────────────────────────────────
 
     private fun newCoordinator(
@@ -279,6 +329,9 @@ private class FakePeerLink : PeerLink {
     /** 每一次 `setCallEnabled` 的原样记录（**不幂等**，见上面那条说明）。 */
     val calls = mutableListOf<Boolean>()
 
+    /** 每一次 `setCallVolume` 的原样记录。2026-11-07 起与 [micVolumes] 一起用。 */
+    val volumes = mutableListOf<Float>()
+
     /** `close()` 被调了几次。`reconcile` 里那条「房间没了就收链路」靠它取证。 */
     var closed = 0
         private set
@@ -331,7 +384,16 @@ private class FakePeerLink : PeerLink {
         calls += enabled
     }
 
-    override fun setCallVolume(volume: Float) = Unit
+    override fun setCallVolume(volume: Float) {
+        volumes += volume
+    }
+
+    /** 每一次 `setMicVolume` 的原样记录（2026-11-07 的缺陷就出在这里被吞掉）。 */
+    val micVolumes = mutableListOf<Float>()
+
+    override fun setMicVolume(volume: Float) {
+        micVolumes += volume
+    }
 
     override fun setMovieVolumeLimit(enabled: Boolean) = Unit
 }

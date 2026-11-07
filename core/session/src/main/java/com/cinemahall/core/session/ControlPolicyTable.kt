@@ -41,9 +41,19 @@ data class ControlPolicy(
     val pairAutoAllow: Boolean = false,
 ) {
 
-    /** 这个人按策略能不能控制（两人房自动同权 → `overrides` → [defaultAllow]）。 */
+    /**
+     * 这个人按策略能不能控制。
+     *
+     * 优先级：**房主单独设过的那一格 → 两人房自动同权 → 全局开关**。
+     *
+     * 2026-11-07 第二版（用户口径「双人房间下改成房主仍可调节成员的控制权限」）：
+     * 上一版把两人房写成「一律允许」，于是房主那一列的开关在两人房里拨不动（显示
+     * 恒为允许），等于把那张卡变成了只读。现在 `overrides` **优先于** [pairAutoAllow]：
+     * 两人房默认允许，房主单独关掉谁，谁就不许 —— 三个人以上时 [pairAutoAllow] 为 false，
+     * 仍然回到「全局开关」那一档，也就是「收回权限」。
+     */
     fun allowedFor(userId: UserId): Boolean =
-        pairAutoAllow || (overrides[userId] ?: defaultAllow)
+        overrides[userId] ?: (pairAutoAllow || defaultAllow)
 
     /**
      * 线上形态（`overrides` 的键是 userId 字符串）。
