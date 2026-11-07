@@ -21,6 +21,26 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * 一个分类（与安卓端 `MovieCategory` 对齐的最小集）。
+ *
+ * 桌面端没有「ID 由服务端发」这件事，所以 `id` 自带生成；[DEFAULT_CATEGORY_ID] 是
+ * 「未分类」这个保留分类 —— 它的名字不可改、不可删，删掉别的分类时影片往它这里退。
+ */
+data class DesktopCategory(
+    val id: String,
+    val name: String,
+    val createdAtMs: Long = 0L,
+) {
+    val isDefault: Boolean get() = id == DEFAULT_CATEGORY_ID
+
+    companion object {
+        const val DEFAULT_CATEGORY_ID = "default"
+
+        val Default = DesktopCategory(DEFAULT_CATEGORY_ID, "电影", 0L)
+    }
+}
+
 /** 一条扫描结果（W2）。[durationMs] 为 0 = 还没解析出来，不是“零长度”。 */
 data class DesktopMovie(
     val path: String,
@@ -28,8 +48,17 @@ data class DesktopMovie(
     val sizeBytes: Long,
     val modifiedAtMs: Long,
     val durationMs: Long = 0L,
+    /** 所属分类；老库读进来时没有这个字段 ⇒ 落回「未分类」。 */
+    val categoryId: String = DesktopCategory.DEFAULT_CATEGORY_ID,
+    /** 用户改过的显示名；null = 用文件名推出来的那个（[DesktopScanRules.displayName]）。 */
+    val titleOverride: String? = null,
 ) {
-    val title: String get() = DesktopScanRules.displayName(fileName)
+    /** 界面上显示、以及交给房间的片名。 */
+    val title: String
+        get() = titleOverride?.takeIf { it.isNotBlank() } ?: DesktopScanRules.displayName(fileName)
+
+    /** 文件名推出来的那个名字（改名对话框拿它当输入框的初始值 / 「恢复默认」的目标）。 */
+    val defaultTitle: String get() = DesktopScanRules.displayName(fileName)
 
     /** 时长已知时才归档；未知（0）返回 null —— 与 `MovieScanRules.classify(0)=SKIP` 同义。 */
     val bucket: ScanBucket? get() = if (durationMs > 0) MovieScanRules.classify(durationMs) else null
@@ -85,6 +114,16 @@ class DesktopMovieCatalog(
     private val _movies = MutableStateFlow<List<DesktopMovie>>(emptyList())
     val movies: StateFlow<List<DesktopMovie>> = _movies.asStateFlow()
 
+    /**
+     * 分类表。**永远**以「未分类」打头 —— 它是保留分类，删不掉也改不了名，
+     * 别的分类被删掉时影片往它这里退（和安卓端 `MovieLibrarySnapshot` 的默认桶一致）。
+     *
+     * ⚠️ 声明位置必须在 `init { load() }` **之前**：`load()` 会写它，晚于 `init` 声明
+     * 就还是 null —— 与下面 `movieOrder` 同一条坑（那次是被 `runCatching` 静默吞掉的）。
+     */
+    private val _categories = MutableStateFlow<List<DesktopCategory>>(listOf(DesktopCategory.Default))
+    val categories: StateFlow<List<DesktopCategory>> = _categories.asStateFlow()
+
     private val _stats = MutableStateFlow(ScanStats())
     val stats: StateFlow<ScanStats> = _stats.asStateFlow()
 
@@ -138,6 +177,125 @@ class DesktopMovieCatalog(
         }
     }
 
+    // ── 分类与影片编辑（复刻安卓端影片库的「分类 / 改名 / 批量移动 / 删除」）──
+
+    /** 新建分类。重名（忽略大小写）直接返回已有的那个，不制造两个同名条目。 */
+    fun addCategory(name: String): DesktopCategory? {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return null
+        _categories.value.firstOrNull { it.name.equals(trimmed, ignoreCase = true) }?.let { return it }
+        val created = DesktopCategory(
+            id = "c" + System.currentTimeMillis().toString(36) + "-" + _categories.value.size,
+            name = trimmed,
+            createdAtMs = System.currentTimeMillis(),
+        )
+        _categories.value = _categories.value + created
+        persist()
+        return created
+    }
+
+    fun renameCategory(id: String, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        val target = _categories.value.firstOrNull { it.id == id } ?: return
+        if (target.isDefault) return
+        if (_categories.value.any { it.id != id && it.name.equals(trimmed, ignoreCase = true) }) return
+        _categories.value = _categories.value.map { if (it.id == id) it.copy(name = trimmed) else it }
+        persist()
+    }
+
+    /** 删分类。里面的影片退到「未分类」，**不删影片**（删片是另一个动作）。 */
+    fun deleteCategory(id: String) {
+        if (id == DesktopCategory.DEFAULT_CATEGORY_ID) return
+        if (_categories.value.none { it.id == id }) return
+        _categories.value = _categories.value.filterNot { it.id == id }
+        _movies.value = _movies.value.map {
+            if (it.categoryId == id) it.copy(categoryId = DesktopCategory.DEFAULT_CATEGORY_ID) else it
+        }
+        persist()
+    }
+
+    /**
+     * 改显示名。[title] 为空（或与默认名相同）= 恢复默认 —— 落盘时写 null，
+     * 这样改了文件名之后界面会跟着变（存死字符串就永远停在旧名字上）。
+     */
+    fun renameMovie(path: String, title: String?) {
+        val next = title?.trim()?.takeIf { it.isNotEmpty() }
+        _movies.value = _movies.value.map { movie ->
+            if (!movie.path.equals(path, ignoreCase = true)) {
+                movie
+            } else {
+                movie.copy(titleOverride = next?.takeIf { it != movie.defaultTitle })
+            }
+        }
+        persist()
+    }
+
+    /** 批量移动。分类不存在时不动（宁可什么都不做，也别把影片丢进一个看不见的桶）。 */
+    fun moveMovies(paths: Collection<String>, categoryId: String) {
+        if (_categories.value.none { it.id == categoryId }) return
+        val wanted = paths.map { it.lowercase() }.toSet()
+        if (wanted.isEmpty()) return
+        _movies.value = _movies.value.map {
+            if (it.path.lowercase() in wanted) it.copy(categoryId = categoryId) else it
+        }
+        persist()
+    }
+
+    /**
+     * 从库里移除（**只移除记录，不删磁盘文件**）。
+     *
+     * 下一次扫描会把它重新扫回来 —— 这是有意的：移除是「这次不想看到」，
+     * 而「永久排除」需要黑名单，那是另一个特性（安卓端也没有）。
+     */
+    fun removeMovies(paths: Collection<String>) {
+        val wanted = paths.map { it.lowercase() }.toSet()
+        if (wanted.isEmpty()) return
+        _movies.value = _movies.value.filterNot { it.path.lowercase() in wanted }
+        persist()
+    }
+
+    fun category(id: String): DesktopCategory =
+        _categories.value.firstOrNull { it.id == id } ?: DesktopCategory.Default
+
+    /**
+     * 手动把一个/多个文件加进某个分类（分类卡上那颗「+」）。
+     *
+     * 与 [scan] 的区别只有一处：它不要求文件在某个根目录下面，也不碰别的影片。
+     * 重复加入按路径去重；已存在的那条只改分类，不重建（保住改名与时长）。
+     *
+     * @return 实际加进来（或改了分类）的条数
+     */
+    fun addFiles(files: List<File>, categoryId: String = DesktopCategory.DEFAULT_CATEGORY_ID): Int {
+        val target = _categories.value.firstOrNull { it.id == categoryId } ?: DesktopCategory.Default
+        val added = ArrayList<DesktopMovie>()
+        _movies.value = _movies.value.map { existing ->
+            val hit = files.firstOrNull { file ->
+                runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
+                    .equals(existing.path, ignoreCase = true)
+            }
+            if (hit != null && existing.categoryId != target.id) existing.copy(categoryId = target.id) else existing
+        }
+        val known = _movies.value.map { it.path.lowercase() }.toSet()
+        files.forEach { file ->
+            val path = runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
+            if (path.lowercase() in known) return@forEach
+            if (!DesktopScanRules.isVideo(file.name)) return@forEach
+            added += DesktopMovie(
+                path = path,
+                fileName = file.name,
+                sizeBytes = file.length(),
+                modifiedAtMs = file.lastModified(),
+                categoryId = target.id,
+            )
+        }
+        if (added.isNotEmpty()) {
+            _movies.value = (_movies.value + added).sortedWith(movieOrder)
+        }
+        if (added.isNotEmpty()) persist()
+        return added.size
+    }
+
     // ── 扫描 ────────────────────────────────────────────────────────────────
 
     /**
@@ -163,13 +321,21 @@ class DesktopMovieCatalog(
             return
         }
 
+        // 分类与显示名是**用户数据**，扫描不能把它们冲掉：扫描只负责「有哪些文件」，
+        // 这两项按路径从上一次的列表里继承下来（文件被删了自然就丢了）。
+        val known = _movies.value.associateBy { it.path.lowercase() }
         val withCache = fast.movies.map { movie ->
             val cached = synchronized(durationCache) { durationCache[movie.path] }
-            if (cached != null && cached.sizeBytes == movie.sizeBytes && cached.modifiedAtMs == movie.modifiedAtMs) {
-                movie.copy(durationMs = cached.durationMs)
-            } else {
-                movie
-            }
+            val keep = known[movie.path.lowercase()]
+            movie.copy(
+                durationMs = if (cached != null && cached.sizeBytes == movie.sizeBytes && cached.modifiedAtMs == movie.modifiedAtMs) {
+                    cached.durationMs
+                } else {
+                    movie.durationMs
+                },
+                categoryId = keep?.categoryId ?: DesktopCategory.DEFAULT_CATEGORY_ID,
+                titleOverride = keep?.titleOverride,
+            )
         }
         _movies.value = withCache
         _stats.value = _stats.value.copy(
@@ -338,6 +504,14 @@ class DesktopMovieCatalog(
      * 存列表**不改变扫描的地位**：重扫仍然覆盖它（新增、删除、改名的文件都以扫描为准），
      * 时长缓存继续按 `(size, mtime)` 失效重算。
      */
+    /** 落盘的一个分类。`version 1` 的库里没有这一段，读进来就是「只有未分类」。 */
+    @Serializable
+    private data class StoredCategory(
+        val id: String,
+        val name: String,
+        val createdAtMs: Long = 0,
+    )
+
     @Serializable
     private data class StoredMovie(
         val path: String,
@@ -345,14 +519,17 @@ class DesktopMovieCatalog(
         val sizeBytes: Long,
         val modifiedAtMs: Long,
         val durationMs: Long = 0,
+        val categoryId: String = DesktopCategory.DEFAULT_CATEGORY_ID,
+        val titleOverride: String? = null,
     )
 
     @Serializable
     private data class Stored(
-        val version: Int = 1,
+        val version: Int = 2,
         val roots: List<String> = emptyList(),
         val durations: Map<String, CachedDuration> = emptyMap(),
         val movies: List<StoredMovie> = emptyList(),
+        val categories: List<StoredCategory> = emptyList(),
     )
 
     private fun load() {
@@ -363,13 +540,52 @@ class DesktopMovieCatalog(
             durationCache.clear()
             durationCache.putAll(stored.durations)
         }
+        // 分类表：读进来的顺序即展示顺序，「未分类」永远排在第一条。
+        val restoredCategories = buildList {
+            add(DesktopCategory.Default)
+            stored.categories.forEach { saved ->
+                if (saved.id != DesktopCategory.DEFAULT_CATEGORY_ID) {
+                    add(DesktopCategory(saved.id, saved.name, saved.createdAtMs))
+                }
+            }
+        }.distinctBy { it.id }
+        // ── 撞名合并（2026-11-07）───────────────────────────────────────────────
+        // 默认分类正式改名叫「电影」（对齐安卓端的初始分类）。老库里可能已经有一个
+        // 用户自己建的「电影」—— 不合并的话，影片库里会出现两张同名卡（实测截图）。
+        // 这里把它整个并进默认分类：影片跟着搬，分类本身删掉。
+        val defaultName = DesktopCategory.Default.name
+        val duplicates = restoredCategories.filter { !it.isDefault && it.name == defaultName }
+        _categories.value = if (duplicates.isEmpty()) {
+            restoredCategories
+        } else {
+            restoredCategories.filterNot { candidate -> duplicates.any { it.id == candidate.id } }
+        }
+        val mergedIds = duplicates.map { it.id }.toSet()
+        val knownCategories = _categories.value.map { it.id }.toSet()
+
         // ── 老库的迁移（2026-11-06）─────────────────────────────────────────────
         // 0.1.6 及以前的 `library.json` 只有「根目录 + 时长缓存」，没有 `movies`。
         // 直接按新格式读就会得到「0 部」，用户升级后第一眼看到的是「我的库空了」——
         // 而时长缓存里的每一项都够还原一条影片（路径、大小、修改时间、时长），
         // 文件名取路径末段即可。所以 `movies` 为空时用它兜底重建；不为空就以 `movies` 为准。
         val restored = if (stored.movies.isNotEmpty()) {
-            stored.movies.map { DesktopMovie(it.path, it.fileName, it.sizeBytes, it.modifiedAtMs, it.durationMs) }
+            stored.movies.map {
+                DesktopMovie(
+                    path = it.path,
+                    fileName = it.fileName,
+                    sizeBytes = it.sizeBytes,
+                    modifiedAtMs = it.modifiedAtMs,
+                    durationMs = it.durationMs,
+                    // 分类被删过（或库是手改的）时退回「未分类」，别让影片变成孤儿；
+                    // 撞名合并掉的那些分类，影片一并搬到默认分类。
+                    categoryId = when {
+                        it.categoryId in mergedIds -> DesktopCategory.DEFAULT_CATEGORY_ID
+                        it.categoryId in knownCategories -> it.categoryId
+                        else -> DesktopCategory.DEFAULT_CATEGORY_ID
+                    },
+                    titleOverride = it.titleOverride,
+                )
+            }
         } else {
             stored.durations.map { (path, cached) ->
                 DesktopMovie(
@@ -391,8 +607,18 @@ class DesktopMovieCatalog(
                 roots = _roots.value,
                 durations = synchronized(durationCache) { HashMap(durationCache) },
                 movies = _movies.value.map {
-                    StoredMovie(it.path, it.fileName, it.sizeBytes, it.modifiedAtMs, it.durationMs)
+                    StoredMovie(
+                        path = it.path,
+                        fileName = it.fileName,
+                        sizeBytes = it.sizeBytes,
+                        modifiedAtMs = it.modifiedAtMs,
+                        durationMs = it.durationMs,
+                        categoryId = it.categoryId,
+                        titleOverride = it.titleOverride,
+                    )
                 },
+                categories = _categories.value.filterNot { it.isDefault }
+                    .map { StoredCategory(it.id, it.name, it.createdAtMs) },
             )
             val temp = File(storeFile.parentFile, storeFile.name + ".tmp")
             temp.writeText(json.encodeToString(stored))

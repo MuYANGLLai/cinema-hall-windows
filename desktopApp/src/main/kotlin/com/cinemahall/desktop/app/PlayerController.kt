@@ -99,11 +99,57 @@ class PlayerController {
 
     val durationProbe: (String) -> Long = { path -> prober?.durationMs(path) ?: 0L }
 
+    /**
+     * 播放器里**当前装着**的那个片源路径。
+     *
+     * ── 为什么需要它（2026-11-07 用户报「切页回来进度归 0」）─────────────────
+     * `PlayerPane` 的 `LaunchedEffect(movie?.path, autoplay)` 在**重新进入组合**时
+     * 会再跑一次（切走再切回就是这种情况）。它原先无条件 `open(...)`，而 `open`
+     * 做的是 `setMediaItem` —— libVLC 那边等于换了一部片，位置自然打回 0。
+     *
+     * 有了这个字段，界面就能判断「这片已经装好了，只是画面重新挂上来」，跳过重开。
+     */
+    var openedPath: String? = null
+        private set
+
     fun open(path: String, fileName: String, sizeBytes: Long): Boolean {
         val target = target ?: return false
         Log.info("选片：$path")
+        openedPath = path
         target.setMediaItem(MediaRef(uri = path, displayName = fileName, sizeBytes = sizeBytes))
         return true
+    }
+
+    /**
+     * 影片封面抽帧器（2026-11-07）。
+     *
+     * **独立的 factory**：抽帧是后台批处理，不能和正在播放的那个播放器抢 vout / 音频设备。
+     * `--vout=wingdi` 是因为抽帧窗口放在屏幕外，d3d11 在离屏窗口上经常拿不到帧。
+     * 懒建 —— 没人进影片库就不该多付一次 libVLC 初始化。
+     */
+    private val thumbnailer: com.cinemahall.desktop.media.VlcThumbnailer? by lazy {
+        runCatching {
+            com.cinemahall.desktop.media.VlcThumbnailer(
+                com.cinemahall.desktop.media.VlcEngine.newFactory(
+                    listOf("--vout=wingdi", "--no-audio", "--no-osd"),
+                ),
+            )
+        }.onFailure { Log.warn("[cover] 抽帧器初始化失败：${it.message}") }.getOrNull()
+    }
+
+    /** 抽一帧写到 [out]。**阻塞**，只能在后台线程调用。 */
+    fun captureCover(path: String, out: File): Boolean {
+        val worker = thumbnailer ?: return false
+        val ok = runCatching { worker.capture(path, out) }.getOrDefault(false)
+        if (ok) {
+            Log.info("[cover] 封面已生成：${out.name}")
+        } else {
+            // 失败时把「目录里有没有半成品」也记下来：它区分「过滤器根本没写文件」
+            // 和「写出了但没取到」—— 这两种要修的地方完全不同。
+            val leftovers = out.parentFile?.listFiles()?.count { it.name.startsWith("thumb_") } ?: -1
+            Log.warn("[cover] 抽帧失败：${out.name} 残留=${leftovers}")
+        }
+        return ok
     }
 
     fun close() {

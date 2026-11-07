@@ -3,6 +3,8 @@ package com.cinemahall.desktop.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -86,6 +88,15 @@ enum class Screen(val label: String, val glyph: String) {
     Settings("设置", "⚙"),
     Diagnostics("诊断", "◎"),
 }
+
+/**
+ * 侧边栏上真正列出来的四格。
+ *
+ * `Diagnostics` 不在里面：2026-11-07 起诊断内容并进设置页，多了这一格只会让
+ * 「首页 / 影厅 / 影片库 / 设置」的直觉被打破。枚举项保留是给 `--screen=diagnostics`
+ * 那条门禁路径用的。
+ */
+private val NAV_ENTRIES = listOf(Screen.Home, Screen.Cinema, Screen.Library, Screen.Settings)
 
 /** 快捷键的落点（窗口级按键在 Main 里接，动作在这里拿）。 */
 object Shortcuts {
@@ -201,6 +212,10 @@ fun AppRoot(
     identityOverride: String? = null,
     /** `--signal-endpoint` 的显式覆盖（null = 用 settings / 内置默认）。 */
     endpointOverride: String? = null,
+    /**
+     * 无边框窗口的外壳（标题栏 / 拖边缩放）。null = 没有（门禁截图、未来多窗口）。
+     */
+    chrome: WindowChrome? = null,
 ) {
     // ── 账号门（W7-C7）：没有有效 token 就不建模块、不连信令 ──────────────────
     // 生产是 `AUTH_MODE=required`：握手不带 bearer token 会被服务端直接 401，
@@ -241,7 +256,11 @@ fun AppRoot(
     }
 
     val colors = LocalCinemaColors.current
-    var screen by remember { mutableStateOf(initialScreen) }
+    // 首页不再承载播放器（2026-11-07）：`--open=<file>` 这条门禁路径必须**直接进影厅**，
+    // 否则启动后停在首页，而片子已经在播放器里装好了 —— 界面上看不到画面。
+    var screen by remember {
+        mutableStateOf(if (initialMovie != null) Screen.Cinema else initialScreen)
+    }
     var current by remember { mutableStateOf(initialMovie) }
     var volume by remember { mutableStateOf(settings.volume) }
     var autoplay by remember { mutableStateOf(initialAutoplay) }
@@ -250,6 +269,7 @@ fun AppRoot(
     val scope = rememberCoroutineScope()
     val movies by catalog.movies.collectAsState()
     val roots by catalog.roots.collectAsState()
+    val categories by catalog.categories.collectAsState()
     val stats by catalog.stats.collectAsState()
 
     // ── 信令模块（W7）：进过影厅页之后才存在 ────────────────────────────────
@@ -401,7 +421,9 @@ fun AppRoot(
      */
     fun openFile(movie: DesktopMovie, startPlaying: Boolean = false) {
         current = movie
-        screen = Screen.Home
+        // 播放器只在影厅页（2026-11-07 用户口径：首页不再承载播放）。选完片就直接
+        // 送进影厅 —— 否则「影片库里点了一部片，界面回到一个没有播放器的首页」。
+        screen = Screen.Cinema
         autoplay = startPlaying
         onSettingsChange(settings.copy(lastMoviePath = movie.path))
         // 真正的 open 由 [PlayerPane] 的 LaunchedEffect 做：那里才知道画面是否已经挂上，
@@ -460,7 +482,14 @@ fun AppRoot(
     }
     Shortcuts.onOpenFile = chooseFile
 
-    Row(Modifier.fillMaxSize().background(colors.background)) {
+    // 无边框窗口的骨架：最上面一条自绘标题栏（全屏时不画），下面是原来的「侧栏 + 内容」。
+    // 拖边缩放的 8 个热区叠在最外层，全屏时关掉（全屏不该再被拉小）。
+    Box(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize()) {
+    if (!fullscreen && chrome != null) {
+        DesktopTitleBar(chrome, "cinema-hall · Windows")
+    }
+    Row(Modifier.weight(1f).fillMaxWidth().background(colors.background)) {
         // ── 左侧导航（全屏时收起）─────────────────────────────────────────────
         if (!fullscreen) {
             Column(
@@ -473,7 +502,10 @@ fun AppRoot(
             Text("影厅", style = MaterialTheme.typography.headlineSmall, color = colors.ink)
             Text("Windows 端", style = MaterialTheme.typography.labelSmall, color = colors.ink3)
             Spacer(Modifier.height(22.dp))
-            Screen.entries.forEach { entry ->
+            // 「诊断」不再单独占一格（2026-11-07 用户口径）：它已经并进设置页，
+            // 侧边栏留着它只会让四个入口变成五个。`Screen.Diagnostics` 仍然保留 ——
+            // `--screen=diagnostics` 那条门禁路径还要用它。
+            NAV_ENTRIES.forEach { entry ->
                 val selected = screen == entry
                 Row(
                     Modifier
@@ -506,20 +538,7 @@ fun AppRoot(
         Box(Modifier.weight(1f).fillMaxHeight()) {
             when (screen) {
                 Screen.Home -> HomeScreen(
-                    controller = controller,
-                    movie = current,
-                    volume = volume,
-                    autoplay = autoplay,
-                    onVolumeChange = {
-                        volume = it
-                        onSettingsChange(settings.copy(volume = it))
-                    },
-                    onOpenFile = chooseFile,
-                    onGoLibrary = { screen = Screen.Library },
-                    onOpenFromLibrary = { openFile(it) },
-                    movies = movies,
-                    fullscreen = fullscreen,
-                    onToggleFullscreen = onToggleFullscreen,
+                    onGoCinema = { screen = Screen.Cinema },
                 )
 
                 Screen.Cinema -> CinemaScreen(
@@ -527,7 +546,6 @@ fun AppRoot(
                     endpoint = endpoint,
                     onEndpointChange = { endpoint = it },
                     nickname = nickname,
-                    onNicknameChange = { nickname = it },
                     connecting = connecting,
                     connectError = connectError,
                     onConnect = { connectCinema() },
@@ -540,6 +558,13 @@ fun AppRoot(
                     onOpenFile = chooseFile,
                     movies = movies,
                     onSelectMovie = { selectForHall(it) },
+                    onClearMovie = {
+                        // 「清除影片」：把当前片从界面与播放器上一起卸掉。
+                        // 只置 null 不暂停，声音会继续走而画面没了 —— 用户会以为程序卡了。
+                        current = null
+                        autoplay = false
+                        controller.target?.pause()
+                    },
                     fullscreen = fullscreen,
                     onToggleFullscreen = onToggleFullscreen,
                 )
@@ -548,6 +573,7 @@ fun AppRoot(
                     catalog = catalog,
                     roots = roots,
                     movies = movies,
+                    categories = categories,
                     scanning = stats.phase == ScanPhase.FAST || stats.phase == ScanPhase.PROBING,
                     stats = stats,
                     onAddRoot = { dir ->
@@ -564,11 +590,19 @@ fun AppRoot(
                     onScan = { scope.launch { catalog.scan() } },
                     onCancel = { catalog.cancel() },
                     onSelect = { openFile(it) },
+                    onAddCategory = { catalog.addCategory(it) },
+                    onRenameCategory = { id, name -> catalog.renameCategory(id, name) },
+                    onDeleteCategory = { catalog.deleteCategory(it) },
+                    onRenameMovie = { path, title -> catalog.renameMovie(path, title) },
+                    onMoveMovies = { paths, categoryId -> catalog.moveMovies(paths, categoryId) },
+                    onRemoveMovies = { catalog.removeMovies(it) },
+                    onAddFiles = { files, categoryId -> catalog.addFiles(files, categoryId) },
                 )
 
                 Screen.Settings -> SettingsScreen(
                     settings = settings,
                     onChange = onSettingsChange,
+                    account = account,
                     volume = volume,
                     onVolume = {
                         volume = it
@@ -578,360 +612,113 @@ fun AppRoot(
                     vlcPath = controller.vlcDir?.absolutePath,
                     initError = controller.initError,
                     onExit = onExit,
+                    diagnostics = {
+                        DiagnosticsContent(
+                            controller = controller,
+                            stats = stats,
+                            movieCount = movies.size,
+                            roots = roots,
+                        )
+                    },
                 )
 
-                Screen.Diagnostics -> DiagnosticsScreen(
-                    controller = controller,
-                    stats = stats,
-                    movieCount = movies.size,
-                    roots = roots,
-                )
+                // `--screen=diagnostics` 这条门禁路径仍然直达诊断；
+                // 产品界面上它已经并进设置页（侧边栏不再有这一格）。
+                Screen.Diagnostics -> Box(Modifier.fillMaxSize()) {
+                    DiagnosticsScreenLegacy(
+                        controller = controller,
+                        stats = stats,
+                        movieCount = movies.size,
+                        roots = roots,
+                    )
+                }
             }
         }
     }
+    }
+    chrome?.let { ResizeHandles(it, enabled = !fullscreen) }
 }
+}
+
 
 // ── 首页 ────────────────────────────────────────────────────────────────────
 
-@Composable
-private fun HomeScreen(
-    controller: PlayerController,
-    movie: DesktopMovie?,
-    volume: Float,
-    autoplay: Boolean,
-    onVolumeChange: (Float) -> Unit,
-    onOpenFile: () -> Unit,
-    onGoLibrary: () -> Unit,
-    onOpenFromLibrary: (DesktopMovie) -> Unit,
-    movies: List<DesktopMovie>,
-    fullscreen: Boolean,
-    onToggleFullscreen: () -> Unit,
-) {
-    val colors = LocalCinemaColors.current
-    Column(Modifier.fillMaxSize()) {
-        // 全屏时把标题行也收起来：全屏的字面意思就是「只剩画面」，留着一条
-        // 通栏标题会让画面上下的黑边永远补不匀（安卓端同样是「外壳一行不留」）。
-        if (!fullscreen) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("首页", style = MaterialTheme.typography.titleLarge, color = colors.ink)
-                    Text(
-                        if (movie == null) "还没选片" else movie.title,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colors.ink3,
-                    )
-                }
-                OutlinedButton(onClick = onGoLibrary) { Text("影片库") }
-                Spacer(Modifier.width(8.dp))
-                Button(onClick = onOpenFile) { Text("打开文件") }
-            }
-        }
-        Box(
-            Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = if (fullscreen) 0.dp else 16.dp),
-        ) {
-            if (movie == null) {
-                EmptyHome(movies = movies, onOpen = onOpenFromLibrary, onGoLibrary = onGoLibrary)
-            } else {
-                PlayerPane(
-                    controller = controller,
-                    movie = movie,
-                    volume = volume,
-                    autoplay = autoplay,
-                    onVolumeChange = onVolumeChange,
-                    onOpenFile = onOpenFile,
-                    fullscreen = fullscreen,
-                    onToggleFullscreen = onToggleFullscreen,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun EmptyHome(
-    movies: List<DesktopMovie>,
-    onOpen: (DesktopMovie) -> Unit,
-    onGoLibrary: () -> Unit,
-) {
-    val colors = LocalCinemaColors.current
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("线上影厅 · 桌面端", style = MaterialTheme.typography.headlineSmall, color = colors.ink)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "先在影片库添加根目录并扫描，或直接打开一个视频文件。",
-                color = colors.ink2,
-            )
-            Spacer(Modifier.height(16.dp))
-            Button(onClick = onGoLibrary) { Text("去影片库") }
-            if (movies.isNotEmpty()) {
-                Spacer(Modifier.height(24.dp))
-                Text("最近可播（${movies.size}）", color = colors.ink3)
-                Spacer(Modifier.height(8.dp))
-                movies.take(5).forEach { movie ->
-                    TextButton(onClick = { onOpen(movie) }) {
-                        Text("${movie.title} · ${formatDuration(movie.durationMs)}", color = colors.accent)
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ── 影片库 ──────────────────────────────────────────────────────────────────
-
-@Composable
-private fun LibraryScreen(
-    catalog: DesktopMovieCatalog,
-    roots: List<String>,
-    movies: List<DesktopMovie>,
-    scanning: Boolean,
-    stats: com.cinemahall.desktop.library.ScanStats,
-    onAddRoot: (File) -> Unit,
-    onRemoveRoot: (String) -> Unit,
-    onScan: () -> Unit,
-    onCancel: () -> Unit,
-    onSelect: (DesktopMovie) -> Unit,
-) {
-    val colors = LocalCinemaColors.current
-    // `⋮` 里「粘贴路径…」用的临时输入。与「选择根目录…」走同一个 `onAddRoot`，
-    // 只是给系统选择器不好用的场景留一条路（网络盘、超长路径、脚本里抄来的路径）。
-    var pastePath by remember { mutableStateOf("") }
-    var pasteOpen by remember { mutableStateOf(false) }
-    var rootMenu by remember { mutableStateOf(false) }
-
-    Column(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 18.dp)) {
-        // ── 标题行：与安卓端「标题 + 右上角操作」同一形状 ─────────────────────
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("影片库", style = MaterialTheme.typography.titleLarge, color = colors.ink)
-                Text(
-                    "多根目录递归扫描 · 快扫先列片，时长后台补",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.ink3,
-                )
-            }
-            OutlinedButton(onClick = { chooseDirectory()?.let(onAddRoot) }) { Text("选择根目录…") }
-            Spacer(Modifier.width(8.dp))
-            if (scanning) {
-                OutlinedButton(onClick = onCancel) { Text("取消扫描") }
-            } else {
-                Button(onClick = onScan, enabled = roots.isNotEmpty()) { Text("开始扫描") }
-            }
-        }
-
-        Spacer(Modifier.height(14.dp))
-
-        // ── 根目录卡片：**只有一行** ──────────────────────────────────────────
-        // 安卓端那张卡是一整块（分类列表 + 添加按钮）。桌面端根目录是扁平的 N 条路径，
-        // 照搬会变成一屏文字，所以压成一行：左边一行摘要（路径用 ` · ` 连起来，超出省略），
-        // 右边「管理」；逐条移除与粘贴路径都收进这一颗的下拉里，不再各占一行。
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(colors.surface2)
-                .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("根目录", style = MaterialTheme.typography.labelSmall, color = colors.ink3)
-            Spacer(Modifier.width(10.dp))
-            Text(
-                if (roots.isEmpty()) {
-                    "还没添加根目录 —— 点右侧「选择根目录…」挑一个文件夹"
-                } else {
-                    roots.joinToString("   ·   ")
-                },
-                Modifier.weight(1f),
-                color = if (roots.isEmpty()) colors.ink3 else colors.ink2,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (roots.size > 1) {
-                Text(
-                    "${roots.size} 个",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.ink3,
-                    modifier = Modifier.padding(start = 8.dp),
-                )
-            }
-            Box {
-                TextButton(onClick = { rootMenu = true }) { Text("管理", color = colors.ink2) }
-                DropdownMenu(expanded = rootMenu, onDismissRequest = { rootMenu = false }) {
-                    DropdownMenuItem(
-                        text = { Text("粘贴路径…") },
-                        onClick = {
-                            rootMenu = false
-                            pastePath = ""
-                            pasteOpen = true
-                        },
-                    )
-                    if (roots.isEmpty()) {
-                        DropdownMenuItem(
-                            text = { Text("（还没有根目录）", color = colors.ink3) },
-                            onClick = { rootMenu = false },
-                        )
-                    }
-                    roots.forEach { root ->
-                        DropdownMenuItem(
-                            text = { Text("移除 · $root", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            onClick = {
-                                rootMenu = false
-                                onRemoveRoot(root)
-                            },
-                        )
-                    }
-                }
-            }
-        }
-
-        if (pasteOpen) {
-            AlertDialog(
-                onDismissRequest = { pasteOpen = false },
-                title = { Text("添加根目录") },
-                text = {
-                    TextField(
-                        value = pastePath,
-                        onValueChange = { pastePath = it },
-                        singleLine = true,
-                        placeholder = { Text("例如 D:\\Movies") },
-                    )
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            val path = pastePath.trim()
-                            pasteOpen = false
-                            if (path.isNotEmpty()) onAddRoot(File(path))
-                        },
-                    ) { Text("添加") }
-                },
-                dismissButton = { TextButton(onClick = { pasteOpen = false }) { Text("取消") } },
-            )
-        }
-
-        // ── 扫描条：也只有一行；没扫过就不出现（空库不该先看到一条「未开始」的灰条）
-        if (scanning || stats.phase != ScanPhase.IDLE) {
-            Spacer(Modifier.height(10.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                if (scanning) {
-                    LinearProgressIndicator(
-                        progress = { if (stats.phase == ScanPhase.FAST) 0f else stats.probedFraction },
-                        modifier = Modifier.width(180.dp),
-                    )
-                    Spacer(Modifier.width(10.dp))
-                }
-                Text(
-                    when (stats.phase) {
-                        ScanPhase.IDLE -> "未开始"
-                        ScanPhase.FAST -> "快扫中…"
-                        ScanPhase.PROBING -> "解析时长 ${stats.probed}/${stats.found}"
-                        ScanPhase.DONE -> "扫描完成：${stats.found} 部"
-                        ScanPhase.CANCELLED -> "已取消（已列出 ${stats.found} 部）"
-                    },
-                    color = colors.ink2,
-                    style = MaterialTheme.typography.labelMedium,
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    "快扫 ${stats.fastElapsedMs}ms · 解析 ${stats.probeElapsedMs}ms · " +
-                        "跳过 ${stats.skippedExtension + stats.skippedHidden + stats.skippedSystemDirs}",
-                    color = colors.ink3,
-                    style = MaterialTheme.typography.labelSmall,
-                )
-            }
-        }
-
-        Spacer(Modifier.height(12.dp))
-        // ── 影片：安卓端的正方形卡片网格 ───────────────────────────────────────
-        Text("影片 · ${movies.size} 部", style = MaterialTheme.typography.titleSmall, color = colors.ink2)
-        Spacer(Modifier.height(8.dp))
-        if (movies.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("还没有影片。添加根目录后点「开始扫描」。", color = colors.ink3)
-            }
-        } else {
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 156.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                gridItems(movies, key = { it.path }) { movie ->
-                    MovieCard(movie = movie, onSelect = { onSelect(movie) })
-                }
-            }
-        }
-    }
-}
-
 /**
- * 一格影片（安卓端 `MovieSquareCard` 的桌面版）。
+ * 首页：功能入口的方块卡片墙（复刻安卓端 `HomeScreen`）。
  *
- * 正方形卡片、底部两行字（片名 / 时长 · 大小），整块可点 —— 与安卓端「点一格选中这部片」
- * 是同一个动作，所以动作名也用同一句。桌面端的影片库没有海报、也不记观看进度，中间就放
- * 一枚压得很淡的播放符：留纯色块的话，整个网格看起来像一排加载失败的占位。
+ * ── 为什么首页不再放播放器（2026-11-07 用户口径）────────────────────────────
+ * 桌面端原来的首页就是「播放器 + 一行选片按钮」。它有两个后果：①一进程序就占着
+ * 一条视频输出，切页时那块 AWT Canvas 被换掉，画面黑掉、进度归 0；②「首页」和
+ * 「影厅」变成同一个东西，导航栏里那一项没有存在的意义。
+ *
+ * 现在播放器只在影厅页，首页回到「入口」的本分：一张方卡，宽度固定为窗宽的 1/5。
+ * 「继续看」那一块已经按用户口径删掉（2026-11-07 追加）—— 首页只做入口，
+ * 不重复影片库已经能做的事。
  */
 @Composable
-private fun MovieCard(movie: DesktopMovie, onSelect: () -> Unit) {
+private fun HomeScreen(onGoCinema: () -> Unit) {
     val colors = LocalCinemaColors.current
     Column(
         Modifier
-            .fillMaxWidth()
-            .aspectRatio(1f)
-            .clip(RoundedCornerShape(12.dp))
-            .background(colors.surface2)
-            .clickable(onClickLabel = "选中这部片", onClick = onSelect),
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp, vertical = 20.dp),
     ) {
-        Box(Modifier.fillMaxWidth().weight(1f)) {
-            Text(
-                "▶",
-                color = colors.ink3.copy(alpha = 0.22f),
-                style = MaterialTheme.typography.headlineMedium,
-                modifier = Modifier.align(Alignment.Center),
+        Text("首页", style = MaterialTheme.typography.headlineSmall, color = colors.ink)
+        Text("线上影厅 · 桌面端", style = MaterialTheme.typography.labelSmall, color = colors.ink3)
+        Spacer(Modifier.height(20.dp))
+        Text("功能入口", style = MaterialTheme.typography.titleSmall, color = colors.ink2)
+        Spacer(Modifier.height(10.dp))
+        // 卡片宽度定成窗宽的 **1/5**（2026-11-07 用户口径）：现在只有「影厅」一个入口，
+        // 但格子数量已经按五个排好 —— 以后加入口直接往这一行里塞，宽度不会跟着变。
+        // 空位用等宽 Spacer 占着，否则一张卡会横向拉满整屏。
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            EntryCard(
+                entry = HomeEntry("影厅", "创建或加入房间，和对方看同一部片", "◉", onGoCinema),
+                modifier = Modifier.weight(1f),
             )
-            Text(
-                when (movie.bucket) {
-                    ScanBucket.MOVIE -> "电影"
-                    ScanBucket.SERIES -> "剧集"
-                    ScanBucket.SKIP -> "短片"
-                    // 快扫阶段时长还没解析出来，`bucket` 就是 null —— 说「待解析」，
-                    // 不说「短片」：后者会让用户以为片子被判成了短片。
-                    null -> "待解析"
-                },
-                color = if (movie.bucket == null) colors.ink3 else colors.accent,
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-            )
+            repeat(4) { Spacer(Modifier.weight(1f)) }
         }
-        Column(Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 8.dp)) {
-            Text(
-                movie.title,
-                color = colors.ink,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(3.dp))
-            Text(
-                if (movie.durationMs > 0) {
-                    "${formatDuration(movie.durationMs)} · ${formatBytes(movie.sizeBytes)}"
-                } else {
-                    "时长待解析 · ${formatBytes(movie.sizeBytes)}"
-                },
-                color = colors.ink3,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+    }
+}
+
+private class HomeEntry(
+    val title: String,
+    val caption: String,
+    val glyph: String,
+    val onClick: () -> Unit,
+)
+
+@Composable
+private fun EntryCard(entry: HomeEntry, modifier: Modifier) {
+    val colors = LocalCinemaColors.current
+    Column(
+        modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(16.dp))
+            .background(colors.surface2)
+            .border(1.dp, colors.line, RoundedCornerShape(16.dp))
+            .clickable(onClickLabel = entry.title, onClick = entry.onClick)
+            .padding(16.dp),
+    ) {
+        Box(
+            Modifier
+                .size(42.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(colors.accent.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(entry.glyph, color = colors.accent, style = MaterialTheme.typography.titleMedium)
         }
+        Spacer(Modifier.weight(1f))
+        Text(entry.title, style = MaterialTheme.typography.titleMedium, color = colors.ink)
+        Text(
+            entry.caption,
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.ink3,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -941,17 +728,32 @@ private fun MovieCard(movie: DesktopMovie, onSelect: () -> Unit) {
 private fun SettingsScreen(
     settings: AppSettings,
     onChange: (AppSettings) -> Unit,
+    /** 账号面板（2026-11-07 用户口径：与安卓端「账号」同一套能力）。 */
+    account: com.cinemahall.desktop.app.account.DesktopAccount,
     volume: Float,
     onVolume: (Float) -> Unit,
     vlcPath: String?,
     initError: String?,
     onExit: () -> Unit,
+    /** 诊断内容（2026-11-07 起并进设置页，不再单独占一格导航）。 */
+    diagnostics: @Composable ColumnScope.() -> Unit = {},
 ) {
     val colors = LocalCinemaColors.current
-    Column(Modifier.fillMaxSize().padding(20.dp)) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(20.dp),
+    ) {
         Text("设置", style = MaterialTheme.typography.titleLarge, color = colors.ink)
         Spacer(Modifier.height(14.dp))
 
+        // 账号排在最前：它是「我是谁」的唯一来源（房间里显示的名字就从这里取）。
+        Panel(title = "账号") {
+            AccountPanel(account)
+        }
+
+        Spacer(Modifier.height(12.dp))
         Panel(title = "外观") {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("日间模式", Modifier.weight(1f), color = colors.ink2)
@@ -1004,13 +806,20 @@ private fun SettingsScreen(
                 OutlinedButton(onClick = onExit) { Text("退出") }
             }
         }
+
+        Spacer(Modifier.height(12.dp))
+        Panel(title = "诊断", subtitle = "运行时 · 影片库 · 日志") {
+            diagnostics()
+        }
+        Spacer(Modifier.height(16.dp))
     }
 }
 
-// ── 诊断 ────────────────────────────────────────────────────────────────────
+
+// ── 诊断（内容，嵌在设置页里）───────────────────────────────────────────────
 
 @Composable
-private fun DiagnosticsScreen(
+private fun DiagnosticsContent(
     controller: PlayerController,
     stats: com.cinemahall.desktop.library.ScanStats,
     movieCount: Int,
@@ -1025,33 +834,55 @@ private fun DiagnosticsScreen(
         }
     }
 
-    Column(Modifier.fillMaxSize().padding(20.dp)) {
-        Text("诊断", style = MaterialTheme.typography.titleLarge, color = colors.ink)
-        Spacer(Modifier.height(14.dp))
-        Panel(title = "运行时") {
-            KeyValue("模式", AppPaths.describe())
-            KeyValue("libVLC", controller.vlcDir?.absolutePath ?: "未找到")
-            KeyValue("可播放", if (controller.canPlay) "是" else "否：${controller.initError}")
-            KeyValue("Java", System.getProperty("java.version") + " · " + System.getProperty("java.vendor"))
-            KeyValue("OS", System.getProperty("os.name") + " " + System.getProperty("os.version"))
-            KeyValue("防休眠", if (KeepAwake.active) "已开启" else "未开启")
-        }
-        Spacer(Modifier.height(12.dp))
-        Panel(title = "影片库") {
-            KeyValue("根目录", roots.size.toString())
-            KeyValue("影片", movieCount.toString())
-            KeyValue("扫描阶段", stats.phase.name)
-            KeyValue("耗时", "快扫 ${stats.fastElapsedMs}ms · 解析 ${stats.probeElapsedMs}ms")
-            KeyValue("跳过", "扩展名 ${stats.skippedExtension} · 隐藏 ${stats.skippedHidden} · 系统目录 ${stats.skippedSystemDirs}")
-        }
-        Spacer(Modifier.height(12.dp))
-        Panel(title = "日志", subtitle = Log.filePath(), modifier = Modifier.weight(1f)) {
+    Column(Modifier.fillMaxWidth()) {
+        KeyValue("模式", AppPaths.describe())
+        KeyValue("libVLC", controller.vlcDir?.absolutePath ?: "未找到")
+        KeyValue("可播放", if (controller.canPlay) "是" else "否：${controller.initError}")
+        KeyValue("Java", System.getProperty("java.version") + " · " + System.getProperty("java.vendor"))
+        KeyValue("OS", System.getProperty("os.name") + " " + System.getProperty("os.version"))
+        KeyValue("防休眠", if (KeepAwake.active) "已开启" else "未开启")
+        Spacer(Modifier.height(10.dp))
+        KeyValue("根目录", roots.size.toString())
+        KeyValue("影片", movieCount.toString())
+        KeyValue("扫描阶段", stats.phase.name)
+        KeyValue("耗时", "快扫 ${stats.fastElapsedMs}ms · 解析 ${stats.probeElapsedMs}ms")
+        KeyValue(
+            "跳过",
+            "扩展名 ${stats.skippedExtension} · 隐藏 ${stats.skippedHidden} · 系统目录 ${stats.skippedSystemDirs}",
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(Log.filePath(), color = colors.ink3, style = MaterialTheme.typography.labelSmall)
+        Spacer(Modifier.height(6.dp))
+        // 固定高度而不是 weight：这段内容在设置页的滚动容器里，weight 在无限高里没有意义。
+        Box(Modifier.fillMaxWidth().height(260.dp)) {
             LazyColumn(Modifier.fillMaxSize()) {
                 items(lines) { line ->
-                    Text(line, color = colors.ink3, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                    Text(
+                        line,
+                        color = colors.ink3,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
                 }
             }
         }
+    }
+}
+
+// ── 诊断（整页版，只给 `--screen=diagnostics` 用）────────────────────────────
+
+@Composable
+private fun DiagnosticsScreenLegacy(
+    controller: PlayerController,
+    stats: com.cinemahall.desktop.library.ScanStats,
+    movieCount: Int,
+    roots: List<String>,
+) {
+    val colors = LocalCinemaColors.current
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Text("诊断", style = MaterialTheme.typography.titleLarge, color = colors.ink)
+        Spacer(Modifier.height(14.dp))
+        DiagnosticsContent(controller = controller, stats = stats, movieCount = movieCount, roots = roots)
     }
 }
 
@@ -1095,7 +926,8 @@ private fun KeyValue(key: String, value: String) {
 
 // ── 系统对话框 ──────────────────────────────────────────────────────────────
 
-private fun chooseDirectory(): File? {
+// 同包的 `LibraryPane.kt` 也要用它（影片库页的「选择根目录…」）。
+internal fun chooseDirectory(): File? {
     var result: File? = null
     val action = {
         val chooser = JFileChooser().apply {

@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.cinemahall.core.account.AccountApiException
+import com.cinemahall.core.account.AccountProfile
 import com.cinemahall.core.account.AccountEndpoint
 import com.cinemahall.core.account.AccountErrorCodes
 import com.cinemahall.core.account.AccountRepository
@@ -14,6 +15,7 @@ import com.cinemahall.core.model.UserId
 import com.cinemahall.desktop.app.DESKTOP_APP_VERSION
 import com.cinemahall.desktop.app.DESKTOP_PLATFORM
 import com.cinemahall.desktop.app.Log
+import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 
 /**
@@ -245,6 +247,37 @@ class DesktopAccount(
     }
 
     fun displayNameOrNull(): String? = (phase as? AccountPhase.Ready)?.displayName
+
+    // ── 账号设置页要用的四个动作（2026-11-07 用户口径：功能与安卓端一致）──────
+    //
+    // 安卓那边这些都在 `AccountSettingsSection` 里，直接操作 `AccountRepository`。
+    // 桌面端不把 repository 泄漏出去（它同时管 token 与落盘），所以在这里各包一层；
+    // 每层只做两件事：转发，以及在成功之后把 [phase] / 资料刷新到最新。
+
+    /** 账号资料（含设备列表）。null = 还没登录或还没拉过。 */
+    val profile: StateFlow<AccountProfile?>?
+        get() = repository?.profile
+
+    /** 拉一次 `GET /api/me`（进设置页时调一次即可）。 */
+    suspend fun refreshProfile() {
+        repository?.refreshProfile()
+    }
+
+    /** 改账号昵称。**房间里的名字也取它**（见大厅那条注释）。 */
+    suspend fun updateDisplayName(displayName: String) {
+        val updated = repository?.updateDisplayName(displayName) ?: return
+        (phase as? AccountPhase.Ready)?.let { phase = it.copy(displayName = updated.displayName) }
+        Log.info("[account] 昵称已更新：${updated.displayName}")
+    }
+
+    /** 踢掉某台设备（自己那台不行：服务端会拒，界面也不给按钮）。 */
+    suspend fun revokeDevice(deviceId: String) {
+        repository?.revokeDevice(deviceId)
+        Log.info("[account] 已移除设备 ${short(deviceId)}")
+    }
+
+    /** 生成一枚恢复码（一次性展示给用户抄走）。 */
+    suspend fun createRecoveryCode(): String? = repository?.createRecoveryCode()
 
     /** 日志里只打短前缀：完整的 deviceId 与 accountId 属于可识别信息，没必要落盘。 */
     private fun short(value: String): String =

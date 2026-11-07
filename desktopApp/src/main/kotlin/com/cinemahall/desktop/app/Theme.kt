@@ -112,3 +112,23 @@ fun CinemaTheme(day: Boolean = false, content: @Composable () -> Unit) {
         CompositionLocalProvider(LocalCinemaColors provides colors, content = content)
     }
 }
+
+/**
+ * 把**已经算好的**一套主题装进另一个组合。
+ *
+ * 悬浮控制栏跑在独立窗口里（`PlaybackOverlay`），那是**另一个组合**：
+ * [CinemaTheme] 只在主窗口里跑过一次，浮层读不到那次的 `LocalCinemaColors`，
+ * 也读不到 `MaterialTheme.colorScheme`（会掉回 `staticCompositionLocalOf` 的默认值
+ * 与 M3 的默认浅色板 —— 表现为「浮层是白底黑字」）。而按 `day` 重算一遍又得知道
+ * 当前主题是哪一个，所以这里直接收下主组合里现成的这两个值。
+ */
+@Composable
+fun CinemaThemeOn(
+    scheme: ColorScheme,
+    colors: CinemaColors,
+    content: @Composable () -> Unit,
+) {
+    MaterialTheme(colorScheme = scheme) {
+        CompositionLocalProvider(LocalCinemaColors provides colors, content = content)
+    }
+}

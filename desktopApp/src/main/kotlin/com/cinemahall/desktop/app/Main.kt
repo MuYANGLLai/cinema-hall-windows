@@ -25,7 +25,9 @@ import com.cinemahall.desktop.app.ui.Screen
 import com.cinemahall.desktop.app.ui.Shortcuts
 import com.cinemahall.desktop.library.DesktopMovie
 import com.cinemahall.desktop.library.DesktopMovieCatalog
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.awt.Rectangle
 import java.awt.Robot
 import java.awt.event.KeyEvent
@@ -133,6 +135,11 @@ fun main(args: Array<String>) {
     }
 
     val controller = PlayerController()
+    // 影片库封面：把这个能力注入 `CoverCache`，界面层就不必认识 libVLC。
+    // 抽帧是阻塞的（等起播），而 `CoverCache` 已经把它放在 IO 线程 + 串行队列里。
+    com.cinemahall.desktop.app.ui.CoverCache.generator = { path, out ->
+        controller.captureCover(path, out)
+    }
     // 信令模块的持有者：建在窗口之外，因为**退出路径**必须能拿到它。
     // 交给 Composable 持有的话，`exitApplication()` 与 JVM 退出之间没有同步点，
     // 关闭动作可能根本没执行 —— 症状就是退出码 0xC0000005（native 工厂没释放）。
@@ -239,24 +246,20 @@ fun main(args: Array<String>) {
 
         val windowState = rememberWindowState(
             size = DpSize(settings.windowWidth.dp, settings.windowHeight.dp),
-            // 初始 placement 也带上：只靠下面的 `LaunchedEffect` 时，开机即全屏这条路
-            // 要等第一次重组后才生效，而全屏的**边框/标题栏**那一刻已经按浮动窗口画好了。
-            placement = if (options.startFullscreen) WindowPlacement.Fullscreen else WindowPlacement.Floating,
+            // placement **固定 Floating**：窗口从一开始就是无边框的，全屏只由下面的
+            // `LaunchedEffect(fullscreen)` 改 bounds 实现。用 `WindowPlacement.Fullscreen`
+            // 会去切窗口样式，正是「退出全屏黑一下」的来源。
+            placement = WindowPlacement.Floating,
         )
 
         // 全屏是**窗口级**状态（与安卓端 `fullscreen` 由外层持有同一条取向）：
         // 收起来的不仅是画面里的控件，还有左侧导航与右侧成员栏 —— 否则「全屏」
         // 只是把画面放大到两条栏之间，上下黑边永远补不匀。
         // Esc 也退出全屏（Windows 用户的肌肉记忆），与按钮、F11 三条路并存。
+        //
+        // ⚠️ 真正的「进/出全屏」在下面 `Window` 的内容里做（要用到 AWT 窗口引用）。
+        // 这里只保留状态本身。
         var fullscreen by remember { mutableStateOf(options.startFullscreen) }
-        LaunchedEffect(fullscreen) {
-            val wanted =
-                if (fullscreen) WindowPlacement.Fullscreen else WindowPlacement.Floating
-            if (windowState.placement != wanted) {
-                windowState.placement = wanted
-                Log.info("[ui] 全屏=$fullscreen → placement=${windowState.placement}")
-            }
-        }
 
         Window(
             onCloseRequest = {
@@ -265,6 +268,10 @@ fun main(args: Array<String>) {
                 forceExitWatchdog()
             },
             title = "cinema-hall · Windows",
+            // 无边框（2026-11-07）：全屏/还原只改窗口尺寸，不切 native 样式 ——
+            // 这是「退出全屏不黑一下」的唯一可靠做法（见 `WindowChrome` 的说明）。
+            // 标题栏与拖边缩放由 `WindowChrome.kt` 自绘。
+            undecorated = true,
             state = windowState,
             onPreviewKeyEvent = { event ->
                 if (event.type != KeyEventType.KeyDown) {
@@ -310,6 +317,39 @@ fun main(args: Array<String>) {
                 }
             },
         ) {
+            // ── 全屏 = 把无边框窗口铺满显示器 ────────────────────────────────────
+            //
+            // 早先用 `GraphicsDevice.fullScreenWindow`：进入不黑、**退出必黑一下**。
+            // 因为它在退出时要把窗口的 native 样式从 `WS_POPUP` 换回 `WS_OVERLAPPEDWINDOW`，
+            // DWM 因此重绘整块窗口（含 libVLC 的 Canvas）。
+            //
+            // 现在窗口本身就是无边框的，全屏只是改 `bounds` —— 样式一次都不切，两头都不黑。
+            // 还原用的 bounds 存在 `savedBounds` 里（每次进入全屏时刷新）。
+            val composeWindow = window
+            val chrome = remember(composeWindow) {
+                com.cinemahall.desktop.app.ui.WindowChrome(composeWindow) {
+                    cleanup()
+                    exitApplication()
+                    forceExitWatchdog()
+                }
+            }
+            var savedBounds by remember { mutableStateOf<java.awt.Rectangle?>(null) }
+            LaunchedEffect(fullscreen) {
+                if (fullscreen) {
+                    savedBounds = composeWindow.bounds
+                    val screen = runCatching {
+                        composeWindow.graphicsConfiguration.bounds
+                    }.getOrElse { java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds }
+                    composeWindow.bounds = screen
+                } else {
+                    val back = savedBounds
+                    if (back != null) {
+                        composeWindow.bounds = back
+                    }
+                }
+                Log.info("[ui] 全屏=$fullscreen bounds=${composeWindow.bounds}")
+            }
+
             CinemaTheme(day = settings.theme == "day") {
                 AppRoot(
                     controller = controller,
@@ -340,6 +380,7 @@ fun main(args: Array<String>) {
                     endpointOverride = options.signalEndpointOverride,
                     fullscreen = fullscreen,
                     onToggleFullscreen = { fullscreen = !fullscreen },
+                    chrome = chrome,
                 )
             }
 
@@ -354,9 +395,28 @@ fun main(args: Array<String>) {
                         window.toFront()
                         window.requestFocus()
                         window.isAlwaysOnTop = true
-                        Thread.sleep(600)
+                        // ⚠️ 这里**不能**用 `Thread.sleep`：它冻住 EDT，浮层的首帧画不出来，
+                        // 截出来的就是一块没画完的窗口。
+                        delay(600)
+                        // 悬浮控制条只对鼠标有反应，而截图脚本按不了鼠标 —— 门禁给它一条
+                        // 直接入口。先叫出来，再等它真的画出第一帧（ComposePanel 首次
+                        // 布局要几百毫秒），最后重新计时一次，别让 2.5 秒在快门那一瞬收回。
+                        if (options.hoverCenter) {
+                            val shown = com.cinemahall.desktop.app.ui.PlaybackOverlay.pokeActive()
+                            var waited = 0
+                            while (waited < 3_000 && !com.cinemahall.desktop.app.ui.PlaybackOverlay.activeSettled()) {
+                                delay(100)
+                                waited += 100
+                            }
+                            com.cinemahall.desktop.app.ui.PlaybackOverlay.pokeActive()
+                            delay(120)
+                            Log.info(
+                                "[ui] 浮层 shown=$shown settled=" +
+                                    "${com.cinemahall.desktop.app.ui.PlaybackOverlay.activeSettled()} waited=${waited}ms",
+                            )
+                        }
                         val bounds: Rectangle = window.bounds
-                        val image = Robot().createScreenCapture(bounds)
+                        val image = withContext(Dispatchers.IO) { Robot().createScreenCapture(bounds) }
                         window.isAlwaysOnTop = false
                         target.parentFile?.mkdirs()
                         ImageIO.write(image, "png", target)
@@ -459,6 +519,14 @@ private data class StartupOptions(
     val signalEndpointOverride: String?,
     /** 门禁用：启动即全屏。与 `--screen=` 同类 —— 截图脚本没法按 F11。 */
     val startFullscreen: Boolean,
+    /**
+     * 门禁用：截图前把悬浮控制条「叫出来」并等它画出第一帧。
+     *
+     * 悬浮控制条（`PlaybackOverlay`）只对「鼠标在画面上移动」有反应，而截图脚本
+     * 没法按鼠标（`Robot.mouseMove` 在无人值守会话里也不可靠）。不叫这一下，
+     * 截图里永远看不到它，也就没法验证「浮在画面上」这件事。
+     */
+    val hoverCenter: Boolean,
     /** C5 自检用的固定房号。 */
     val roomId: String,
     val rtcPort: Int,
@@ -470,7 +538,7 @@ private data class StartupOptions(
             "rtcSelfTest=${rtcSelfTest ?: "-"} rtcCallTest=${rtcCallTest ?: "-"} " +
             "rtcTone=$rtcTone roomTest=${roomTest ?: "-"} sessionTest=${sessionTest ?: "-"} " +
             "roomId=$roomId screen=${initialScreen ?: "home"} cinemaCreate=$cinemaCreate " +
-            "fullscreen=$startFullscreen " +
+            "fullscreen=$startFullscreen hoverCenter=$hoverCenter " +
             "cinemaJoin=${cinemaJoin ?: "-"} identity=${identity ?: "-"} " +
             "activate=${activateCode != null} deviceName=${deviceName ?: "-"} " +
             "nickname=${nickname ?: "-"} " +
@@ -497,6 +565,7 @@ private data class StartupOptions(
                 sessionTest = value("--session-test")?.takeIf { it.isNotBlank() },
                 initialScreen = value("--screen")?.takeIf { it.isNotBlank() },
                 startFullscreen = args.contains("--fullscreen"),
+                hoverCenter = args.contains("--hover-center"),
                 cinemaCreate = args.contains("--cinema-create"),
                 cinemaJoin = value("--cinema-join")?.takeIf { it.isNotBlank() },
                 identity = value("--identity")?.takeIf { it.isNotBlank() },

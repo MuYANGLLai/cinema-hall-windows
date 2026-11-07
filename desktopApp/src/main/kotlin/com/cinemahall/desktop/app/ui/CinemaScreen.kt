@@ -1,12 +1,16 @@
 package com.cinemahall.desktop.app.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,15 +19,22 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,10 +47,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogWindow
+import androidx.compose.ui.window.rememberDialogState
 import com.cinemahall.core.media.MediaCheck
 import com.cinemahall.core.media.MismatchReason
 import com.cinemahall.core.model.Member
@@ -64,6 +82,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.swing.Swing
 import kotlinx.coroutines.withContext
 import java.awt.Toolkit
+import kotlin.math.roundToInt
 import java.awt.datatransfer.StringSelection
 import java.io.File
 
@@ -92,7 +111,6 @@ fun CinemaScreen(
     endpoint: String,
     onEndpointChange: (String) -> Unit,
     nickname: String,
-    onNicknameChange: (String) -> Unit,
     connecting: Boolean,
     connectError: String?,
     onConnect: () -> Unit,
@@ -110,17 +128,36 @@ fun CinemaScreen(
     /** 全屏（窗口级，由 `Main` 承载）。全屏时右侧成员栏也收起来。 */
     fullscreen: Boolean = false,
     onToggleFullscreen: () -> Unit = {},
+    /** 「清除影片」（复刻安卓简洁模式影片卡的第二颗按钮）：把当前片卸下来。 */
+    onClearMovie: () -> Unit = {},
 ) {
     val colors = LocalCinemaColors.current
 
     if (module == null) {
-        ConnectPanel(
-            endpoint = endpoint,
-            onEndpointChange = onEndpointChange,
-            connecting = connecting,
-            error = connectError,
-            onConnect = onConnect,
-        )
+        // 未连接：**画面照样在**（本机看片不需要信令），右边一列是「连信令」。
+        Box(Modifier.fillMaxSize().background(colors.background)) {
+            StageLayout(
+                controller = controller,
+                movie = movie,
+                volume = volume,
+                autoplay = autoplay,
+                onVolumeChange = onVolumeChange,
+                onOpenFile = onOpenFile,
+                fullscreen = fullscreen,
+                onToggleFullscreen = onToggleFullscreen,
+                onPickMovie = onOpenFile,
+                movies = movies,
+                onSelectMovie = onSelectMovie,
+            ) {
+                ConnectSidePanel(
+                    endpoint = endpoint,
+                    onEndpointChange = onEndpointChange,
+                    connecting = connecting,
+                    error = connectError,
+                    onConnect = onConnect,
+                )
+            }
+        }
         return
     }
 
@@ -141,17 +178,34 @@ fun CinemaScreen(
 
     val current = room
     Box(Modifier.fillMaxSize().background(colors.background)) {
-        if (current == null) {
-            LobbyPanel(
-                module = module,
-                signalState = signalState,
-                nickname = nickname,
-                onNicknameChange = onNicknameChange,
-                onDisconnect = onDisconnect,
-                connectError = connectError,
-            )
-        } else {
-            HallPanel(
+        // ── 影厅页 = **播放器常驻左侧** + 右侧一块面板（2026-11-07 用户口径）──────
+        // 「首页不要播放器页面」之后，本机看片必须在这里能看 —— 未连接、未进房两种
+        // 状态都保留画面（与安卓端「影厅页永远有播放器」同一条结构）。
+        // 右侧那块面板三态：未连接（连信令）/ 未进房（建房、加入、房间清单）/ 在房（成员栏）。
+        when {
+            current == null -> StageLayout(
+                controller = controller,
+                movie = movie,
+                volume = volume,
+                autoplay = autoplay,
+                onVolumeChange = onVolumeChange,
+                onOpenFile = onOpenFile,
+                fullscreen = fullscreen,
+                onToggleFullscreen = onToggleFullscreen,
+                onPickMovie = onOpenFile,
+                movies = movies,
+                onSelectMovie = onSelectMovie,
+            ) {
+                LobbySidePanel(
+                    module = module,
+                    signalState = signalState,
+                    nickname = nickname,
+                    onDisconnect = onDisconnect,
+                    connectError = connectError,
+                )
+            }
+
+            else -> HallPanel(
                 module = module,
                 room = current,
                 controller = controller,
@@ -162,6 +216,7 @@ fun CinemaScreen(
                 onOpenFile = onOpenFile,
                 movies = movies,
                 onSelectMovie = onSelectMovie,
+                onClearMovie = onClearMovie,
                 fullscreen = fullscreen,
                 onToggleFullscreen = onToggleFullscreen,
             )
@@ -169,265 +224,127 @@ fun CinemaScreen(
     }
 }
 
-// ── ① 未连接 ────────────────────────────────────────────────────────────────
-
+/**
+ * 影厅页的「舞台」：左边画面（常驻），右边一列面板。
+ *
+ * 画面这一块**必须**由本函数持有、并且每次进入影厅页都走同一个调用点 ——
+ * `SwingPanel` 里的 AWT Canvas 换了实例就等于换了视频输出，画面会黑、进度会被打回 0。
+ * 全屏时右栏收起，画面占满（与 `HallPanel` 同一条口径）。
+ */
 @Composable
-private fun ConnectPanel(
-    endpoint: String,
-    onEndpointChange: (String) -> Unit,
-    connecting: Boolean,
-    error: String?,
-    onConnect: () -> Unit,
+private fun StageLayout(
+    controller: PlayerController,
+    movie: DesktopMovie?,
+    volume: Float,
+    autoplay: Boolean,
+    onVolumeChange: (Float) -> Unit,
+    onOpenFile: () -> Unit,
+    fullscreen: Boolean,
+    onToggleFullscreen: () -> Unit,
+    onPickMovie: () -> Unit,
+    movies: List<DesktopMovie>,
+    onSelectMovie: (DesktopMovie) -> Unit,
+    panel: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = LocalCinemaColors.current
-    Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.TopCenter) {
-        Column(Modifier.width(520.dp).padding(top = 48.dp)) {
-            Text("影厅", style = MaterialTheme.typography.headlineMedium, color = colors.ink)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "还没有连接信令服务器。连上之后才能建房或加入房间；只在本机看电影不需要这一步。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = colors.ink2,
+    var picking by remember { mutableStateOf(false) }
+
+    Row(Modifier.fillMaxSize()) {
+        Column(Modifier.weight(1f).fillMaxHeight()) {
+            // 画面顶部**不再有片源条**（2026-11-07 用户口径：「影厅顶部的选片源那一栏删掉」）。
+            // 换片入口挪到右栏：这里一进来就是画面本身，与安卓端「影厅页顶上只有播放器」一致。
+            PlayerPane(
+                controller = controller,
+                movie = movie,
+                volume = volume,
+                autoplay = autoplay,
+                onVolumeChange = onVolumeChange,
+                onOpenFile = onOpenFile,
+                modifier = Modifier.weight(1f),
+                fullscreen = fullscreen,
+                onToggleFullscreen = onToggleFullscreen,
             )
-            Spacer(Modifier.height(18.dp))
-            OutlinedTextField(
-                value = endpoint,
-                onValueChange = onEndpointChange,
-                label = { Text("信令服务地址") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "默认 $DEFAULT_SIGNAL_ENDPOINT（线上服务）。自建服务器就填它的地址，" +
-                    "本机开发形如 ws://192.168.1.10:8080。",
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.ink3,
-            )
-            Spacer(Modifier.height(16.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = onConnect, enabled = !connecting) {
-                    Text(if (connecting) "连接中…" else "连接信令服务器")
-                }
-                if (error != null) {
-                    Spacer(Modifier.width(12.dp))
-                    Text(error, color = colors.danger, style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-    }
-}
-
-// ── ② 大厅：建房 / 加入 / 房间清单 ──────────────────────────────────────────
-
-@Composable
-private fun LobbyPanel(
-    module: DesktopModule,
-    signalState: SignalState,
-    nickname: String,
-    onNicknameChange: (String) -> Unit,
-    onDisconnect: () -> Unit,
-    connectError: String?,
-) {
-    val colors = LocalCinemaColors.current
-    val scope = rememberCoroutineScope()
-
-    var roomCode by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var notice by remember { mutableStateOf<String?>(null) }
-    var lastError by remember { mutableStateOf<String?>(null) }
-
-    var rooms by remember { mutableStateOf<List<RoomSummary>?>(null) }
-    var roomsLoading by remember { mutableStateOf(false) }
-    var roomsError by remember { mutableStateOf<String?>(null) }
-
-    suspend fun loadRooms() {
-        roomsLoading = true
-        roomsError = null
-        runCatching { module.signaler.listRooms() }
-            .onSuccess { rooms = it }
-            .onFailure { roomsError = friendlySignalError(it) }
-        roomsLoading = false
-    }
-
-    // 连上并且不在房里才拉清单：在房里拉没有意义，而「刚退房」恰恰必须重拉
-    // （房间表刚刚变过，手上这份已经过期）。
-    LaunchedEffect(signalState) {
-        if (signalState is SignalState.Online && module.signaler.room.value == null) loadRooms()
-    }
-
-    fun act(success: String, block: suspend () -> Unit) {
-        scope.launch {
-            busy = true
-            lastError = null
-            runCatching { block() }
-                .onSuccess { notice = success }
-                .onFailure { lastError = friendlySignalError(it) }
-            busy = false
-        }
-    }
-
-    Column(Modifier.fillMaxSize().padding(28.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("大厅", style = MaterialTheme.typography.headlineSmall, color = colors.ink)
-            Spacer(Modifier.width(12.dp))
-            Text(signalStateText(signalState), style = MaterialTheme.typography.labelMedium, color = colors.ink3)
-            Spacer(Modifier.weight(1f))
-            OutlinedButton(onClick = onDisconnect) { Text("断开") }
-        }
-        Spacer(Modifier.height(16.dp))
-
-        // 连接期 / 自动进房的失败也要在这里说一声：这一页没有「连接」按钮，
-        // 错误只挂在连接面板上的话，用户会看到一片空大厅而不知道为什么。
-        if (connectError != null) {
-            Text(connectError, style = MaterialTheme.typography.bodySmall, color = colors.danger)
-            Spacer(Modifier.height(10.dp))
         }
 
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            // ── 建房 / 加入 ────────────────────────────────────────────────
-            Column(Modifier.width(430.dp)) {
-                OutlinedTextField(
-                    value = nickname,
-                    onValueChange = onNicknameChange,
-                    label = { Text("昵称（对方看到的名字）") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
-                    value = roomCode,
-                    onValueChange = { roomCode = it.uppercase().filter { c -> !c.isWhitespace() } },
-                    label = { Text("房间号（6 位，留空 = 服务端随机）") },
-                    singleLine = true,
-                    isError = roomCode.isNotEmpty() && !isRoomCode(roomCode),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it },
-                    label = { Text("密码（可留空）") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(14.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        enabled = !busy && (roomCode.isEmpty() || isRoomCode(roomCode)),
-                        onClick = {
-                            // 昵称必须在进房**之前**交给玩法：`cinema.hello` 里带的就是它，
-                            // 晚一步发出去的就是空名字（Android 侧踩过同一条）。
-                            module.handler.localNickname = nickname
-                            act("已创建房间") {
-                                val created = module.signaler.createRoom(
-                                    nickname = nickname,
-                                    password = password.takeIf { it.isNotBlank() },
-                                    roomId = roomCode.takeIf { it.isNotBlank() },
-                                )
-                                copyToClipboard(created.roomId)
-                            }
-                        },
-                    ) { Text("创建房间") }
-
-                    OutlinedButton(
-                        enabled = !busy && isRoomCode(roomCode),
-                        onClick = {
-                            module.handler.localNickname = nickname
-                            act("已加入房间") {
-                                module.signaler.joinRoom(
-                                    roomCode,
-                                    nickname,
-                                    password.takeIf { it.isNotBlank() },
-                                )
-                            }
-                        },
-                    ) { Text("加入房间") }
-
-                    if (busy) {
-                        Text("处理中…", style = MaterialTheme.typography.labelSmall, color = colors.ink3)
-                    }
-                }
-                if (roomCode.isNotEmpty() && !isRoomCode(roomCode)) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "房号必须 6 位，且不含 0 / O / 1 / I / L（这几个字符在别的字体里会认错）。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.danger,
-                    )
-                }
-                if (notice != null) {
-                    Spacer(Modifier.height(10.dp))
-                    Text(notice!!, style = MaterialTheme.typography.bodySmall, color = colors.success)
-                }
-                if (lastError != null) {
-                    Spacer(Modifier.height(10.dp))
-                    Text(lastError!!, style = MaterialTheme.typography.bodySmall, color = colors.danger)
-                }
-            }
-
-            // ── 房间清单 ───────────────────────────────────────────────────
-            Column(Modifier.weight(1f)) {
+        if (!fullscreen) {
+            Column(
+                Modifier
+                    .width(380.dp)
+                    .fillMaxHeight()
+                    .background(colors.surface2)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+            ) {
+                // 选片入口：顶部一行，不占画面高度。
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("当前房间", style = MaterialTheme.typography.titleSmall, color = colors.ink)
-                    Spacer(Modifier.width(8.dp))
                     Text(
-                        if (roomsLoading) "拉取中…" else "${rooms?.size ?: 0} 个",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.ink3,
+                        movie?.title ?: "还没有选片",
+                        Modifier.weight(1f),
+                        color = if (movie == null) colors.ink3 else colors.ink,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                    Spacer(Modifier.weight(1f))
-                    TextButton(enabled = !roomsLoading, onClick = { scope.launch { loadRooms() } }) {
-                        Text("刷新")
-                    }
+                    OutlinedButton(onClick = { picking = true }) { Text("从影片库选片") }
                 }
-                if (roomsError != null) {
-                    Text(roomsError!!, style = MaterialTheme.typography.bodySmall, color = colors.danger)
-                } else if (rooms.isNullOrEmpty()) {
-                    Text(
-                        if (signalState is SignalState.Online) "现在没有开着的房间。建房之后把房号念给对方。" else "连上信令服务器之后才会列出房间。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.ink3,
-                    )
-                } else {
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(rooms!!, key = { it.roomId }) { summary ->
-                            RoomRow(summary) {
-                                module.handler.localNickname = nickname
-                                roomCode = summary.roomId
-                                lastError = null
-                                notice = "已选中房间 ${summary.roomId}；有密码的话填上再点「加入房间」。"
-                            }
-                        }
-                    }
-                }
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider(color = colors.line)
+                Spacer(Modifier.height(10.dp))
+                panel()
             }
         }
     }
+
+    if (picking) {
+        LibraryPickerDialog(
+            movies = movies,
+            currentPath = movie?.path,
+            onPick = {
+                picking = false
+                onSelectMovie(it)
+            },
+            onOpenFile = {
+                picking = false
+                onOpenFile()
+            },
+            onDismiss = { picking = false },
+        )
+    }
 }
 
+/**
+ * 大厅里的一张房间卡。
+ *
+ * 按钮文案是「加入」而不是「选中」（2026-11-07 用户口径）：无密码的房间点一下**直接进房**，
+ * 有密码的才在调用方弹出密码框。原来那颗「选中」只把房号填进输入框，用户还得再按一次
+ * 「加入房间」——同一件事要按两次，而且第一次按完界面没有任何「我进房了」的反馈。
+ */
 @Composable
-private fun RoomRow(summary: RoomSummary, onPick: () -> Unit) {
+private fun RoomRow(summary: RoomSummary, onJoin: () -> Unit, enabled: Boolean = true) {
     val colors = LocalCinemaColors.current
     Row(
         Modifier
             .fillMaxWidth()
             .background(colors.surface, RoundedCornerShape(10.dp))
             .border(1.dp, colors.line, RoundedCornerShape(10.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(summary.roomId, fontFamily = FontFamily.Monospace, color = colors.ink, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.width(10.dp))
-        Text(
-            "房主 ${summary.hostNickname} · ${summary.memberCount}/${summary.maxSeats} 人" +
-                if (summary.hasPassword) " · 有密码" else "",
-            style = MaterialTheme.typography.labelSmall,
-            color = colors.ink3,
-        )
-        Spacer(Modifier.weight(1f))
-        TextButton(onClick = onPick) { Text("选中") }
+        Column(Modifier.weight(1f)) {
+            Text(
+                summary.roomId,
+                fontFamily = FontFamily.Monospace,
+                color = colors.ink,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "房主 ${summary.hostNickname} · ${summary.memberCount}/${summary.maxSeats} 人" +
+                    if (summary.hasPassword) " · 有密码" else "",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.ink3,
+            )
+        }
+        OutlinedButton(onClick = onJoin, enabled = enabled) { Text("加入") }
     }
 }
 
@@ -447,10 +364,16 @@ private fun HallPanel(
     onSelectMovie: (DesktopMovie) -> Unit = {},
     fullscreen: Boolean = false,
     onToggleFullscreen: () -> Unit = {},
+    /** 「清除影片」（复刻安卓简洁模式影片卡的第二颗按钮）：把当前片卸下来。 */
+    onClearMovie: () -> Unit = {},
 ) {
     val colors = LocalCinemaColors.current
     val callAudio by module.handler.callAudio.collectAsState()
     val mediaCheck by module.handler.mediaCheck.collectAsState()
+    // 「房间成员」卡的麦克风列：别人那行读 `cinema.call_state`（`peerCall`），
+    // 自己那行读本机通话状态 —— 与安卓端 `CinemaHomeScreen` 完全同一条口径。
+    val peerCall by module.handler.peerCall.collectAsState()
+    val controlPolicy by module.handler.controlPolicy.collectAsState()
     val linkState by module.link.state.collectAsState()
     val signalState by module.signaler.state.collectAsState()
 
@@ -534,203 +457,384 @@ private fun HallPanel(
 
     Row(Modifier.fillMaxSize()) {
         Column(Modifier.weight(1f).fillMaxHeight()) {
-            if (picking) {
-                SourcePicker(
-                    movies = movies,
-                    currentPath = movie?.path,
-                    onPick = {
-                        picking = false
-                        onSelectMovie(it)
-                    },
-                    onCancel = { picking = false },
-                    onOpenFile = onOpenFile,
-                )
-            } else {
-                // 全屏时把「片源条 + 成员提示」也收起来：全屏只留画面与控制条。
-                if (!fullscreen) {
-                    SourceBanner(
-                        isHost = isHost,
-                        check = mediaCheck,
-                        onOpenFile = onOpenFile,
-                        onPickFromLibrary = { picking = true },
+            // 画面顶部不再有片源条（2026-11-07 用户口径）：片源信息与选片入口都在右栏
+            // 的「影片」卡里。这里只留成员端那句「为什么按不动」的说明。
+            if (!fullscreen) {
+                if (!isHost) {
+                    Text(
+                        "播放由房主控制：本机的播放键、±10s、进度条与倍速已锁；换片、音量、字幕不受限。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.ink3,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                     )
-                    if (!isHost) {
-                        Text(
-                            "播放由房主控制：本机的播放键、±10s、进度条与倍速已锁；换片、音量、字幕不受限。",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = colors.ink3,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                        )
-                    }
                 }
-                PlayerPane(
-                    controller = controller,
-                    movie = movie,
-                    volume = volume,
-                    autoplay = autoplay,
-                    onVolumeChange = onVolumeChange,
-                    onOpenFile = onOpenFile,
-                    hooks = hooks,
-                    modifier = Modifier.weight(1f),
-                    // 控制权取自同步引擎的 `canControl`（契约 §7 的唯一真值：房主恒真、
-                    // 成员按策略表且「在看」）。它同时管播放键、±10s、进度条与倍速；
-                    // 音量/字幕不在此列。2026-11-06 用户报「房员能自己拖进度条」就是这里
-                    // 原先只判了「片源不一致」，没判控制权。
-                    interactive = syncStatus.canControl && !listening,
-                    fullscreen = fullscreen,
-                    onToggleFullscreen = onToggleFullscreen,
-                    // 手动同步：房主按 = 立刻广播自己的位置；成员按 = 请房主回一条心跳。
-                    // 它不参与控制权划分（两端都安全），与安卓端同一口径。
-                    onManualSync = { module.handler.requestManualSync() },
-                    // 成员端的说明改到画面左上角（与安卓端那条灰条同位置），
-                    // 不再占掉画面高度 —— 全屏时也能看到「为什么按不动」。
-                    controlHint = if (!isHost && !listening) {
-                        "播放由房主控制（换片 / 音量 / 字幕不受限）"
-                    } else {
-                        null
-                    },
-                )
             }
+            PlayerPane(
+                controller = controller,
+                movie = movie,
+                volume = volume,
+                autoplay = autoplay,
+                onVolumeChange = onVolumeChange,
+                onOpenFile = onOpenFile,
+                hooks = hooks,
+                modifier = Modifier.weight(1f),
+                // 控制权取自同步引擎的 `canControl`（契约 §7 的唯一真值：房主恒真、
+                // 成员按策略表且「在看」）。它同时管播放键、±10s、进度条与倍速；
+                // 音量/字幕不在此列。2026-11-06 用户报「房员能自己拖进度条」就是这里
+                // 原先只判了「片源不一致」，没判控制权。
+                interactive = syncStatus.canControl && !listening,
+                fullscreen = fullscreen,
+                onToggleFullscreen = onToggleFullscreen,
+                // 手动同步：房主按 = 立刻广播自己的位置；成员按 = 请房主回一条心跳。
+                // 它不参与控制权划分（两端都安全），与安卓端同一口径。
+                onManualSync = { module.handler.requestManualSync() },
+                // 成员端的说明改到画面左上角（与安卓端那条灰条同位置），
+                // 不再占掉画面高度 —— 全屏时也能看到「为什么按不动」。
+                controlHint = if (!isHost && !listening) {
+                    "播放由房主控制（换片 / 音量 / 字幕不受限）"
+                } else {
+                    null
+                },
+            )
         }
 
-        // 全屏时右侧成员栏整块收起：332dp 常驻栏会把画面挤成窄条，
-        // 「全屏」就名不副实了。成员列表在非全屏时照旧。
+        // ── 右侧栏（2026-11-07 重做）───────────────────────────────────────────
+        //
+        // 结构对齐安卓端影厅页：**房间成员 → 通话 → 影片**；从下往上就是
+        // 影片（贴底）→ 通话 → 房间成员（贴顶）。全屏时整块收起。
+        //
+        // 「复制房间号」从一颗宽按钮变成房间号右边的一个小图标（用户口径）；
+        // 「重发片源」整颗删掉 —— 它是「片源摘要一直没到对端」时手动补一次的兜底，
+        // 现在协调者在链路建起来、换片时都会自动重发，正常使用碰不到它。
         if (!fullscreen) {
             Column(
                 Modifier
-                    .width(332.dp)
+                    .width(360.dp)
                     .fillMaxHeight()
                     .background(colors.surface2)
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("房间号", style = MaterialTheme.typography.labelMedium, color = colors.ink3)
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    room.roomId,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.SemiBold,
-                    color = colors.ink,
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TextButton(onClick = { copyToClipboard(room.roomId) }) { Text("复制房间号") }
-                TextButton(onClick = { module.resendSignature() }) { Text("重发片源") }
-            }
-            Text(
-                "玩法 ${room.mode} · ${room.members.size} 人 · " + signalStateText(signalState),
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.ink3,
-            )
-
-            Spacer(Modifier.height(10.dp))
-            HorizontalDivider(color = colors.line)
-            Spacer(Modifier.height(10.dp))
-
-            Text("成员 · ${room.members.size}", style = MaterialTheme.typography.titleSmall, color = colors.ink)
-            Spacer(Modifier.height(6.dp))
-            LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(room.members, key = { it.userId.value }) { member ->
-                    MemberRow(
-                        member = member,
-                        isHost = member.userId == room.hostUserId,
-                        isMe = member.userId == module.myUserId,
-                        // 房主自己那一格在 `room_created` 快照里可能没有昵称（服务端只保证
-                        // 加入者带昵称），此时用本机昵称兜住 —— 总比显示一串 userId 好读。
-                        myNickname = module.handler.localNickname,
-                        awaitingSource = !isHostOf(member, room) && mediaCheck.remote == null,
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+            ) {
+                // 房间号：位置不变，复制做成右侧小图标。
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("房间号", style = MaterialTheme.typography.labelMedium, color = colors.ink3)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        room.roomId,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.ink,
+                    )
+                    Spacer(Modifier.width(2.dp))
+                    Text(
+                        "⧉",
+                        color = colors.ink3,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(onClickLabel = "复制房间号") { copyToClipboard(room.roomId) }
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        signalStateText(signalState),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.ink3,
                     )
                 }
-            }
-            if (room.members.size < 2) {
                 Text(
-                    "还差一个人。把房间号念给对方，让他在另一台机器上「加入房间」。",
+                    "玩法 ${room.mode} · 链路 ${peerStateText(linkState)}",
                     style = MaterialTheme.typography.labelSmall,
                     color = colors.ink3,
                 )
-                Spacer(Modifier.height(8.dp))
+
+                Spacer(Modifier.height(10.dp))
+                HallCard(title = "房间成员", subtitle = "${room.members.size} 人") {
+                    MemberHeader()
+                    room.members.forEach { member ->
+                        MemberTableRow(
+                            member = member,
+                            isHostOfRoom = member.userId == room.hostUserId,
+                            isMe = member.userId == module.myUserId,
+                            myNickname = module.handler.localNickname,
+                            allow = controlPolicy.allowedFor(member.userId),
+                            // 只有房主能拨别人；自己那行只显示结论（与安卓端一致）。
+                            canSwitch = isHost && member.userId != module.myUserId,
+                            micOn = if (member.userId == module.myUserId) {
+                                callAudio.sending
+                            } else {
+                                peerCall[member.userId]?.let { it.callOn && it.micOn } ?: false
+                            },
+                            onSetAllowed = { module.handler.setMemberAllowed(member.userId, it) },
+                        )
+                    }
+                    if (room.members.size < 2) {
+                        Text(
+                            "还差一个人。把房间号念给对方，让他在另一台机器上点「加入」。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.ink3,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                HallCard(
+                    title = "通话",
+                    // 与安卓简洁模式一致：开关就在标题右边，不占额外一行。
+                    trailing = {
+                        OutlinedButton(
+                            onClick = { module.handler.setCallEnabled(!callAudio.requested, "影厅面板") },
+                        ) {
+                            Text(if (callAudio.requested) "关闭通话" else "开启通话")
+                        }
+                    },
+                ) {
+                    Text(
+                        callStateText(callAudio),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when {
+                            callAudio.error != null -> colors.danger
+                            callAudio.sending && callAudio.receiving -> colors.success
+                            else -> colors.ink3
+                        },
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    // 两路音量：本机麦克风增益 + 对端声音。与安卓端同一条口径 ——
+                    // 它们都是本机自己的输出/输入，与「谁控制播放」无关，所以始终可调。
+                    VolumeRow(
+                        label = "麦克风输入音量",
+                        value = callAudio.micVolume,
+                        icon = "🎤",
+                    ) { module.handler.setMicVolume(it) }
+                    VolumeRow(
+                        label = "接收音量",
+                        value = callAudio.volume,
+                        icon = "🎧",
+                    ) { module.handler.setCallVolume(it) }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                HallCard(
+                    title = "影片",
+                    subtitle = sourceStatusText(mediaCheck, isHost),
+                ) {
+                    Text(
+                        movie?.title ?: "还没有选片",
+                        color = if (movie == null) colors.ink3 else colors.ink,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    // 两颗按钮与安卓简洁模式一致：「片库」弹浮窗选片，「清除影片」把当前片卸掉。
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { picking = true }) { Text("片库") }
+                        OutlinedButton(onClick = onClearMovie, enabled = movie != null) { Text("清除影片") }
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
+                TextButton(onClick = { module.leaveRoom() }) { Text("离开房间") }
             }
-
-            HorizontalDivider(color = colors.line)
-            Spacer(Modifier.height(10.dp))
-            CallPanel(
-                audio = callAudio,
-                onToggle = { enabled -> module.handler.setCallEnabled(enabled, "影厅面板") },
-                onVolume = { module.handler.setCallVolume(it) },
-            )
-
-            Spacer(Modifier.height(10.dp))
-            HorizontalDivider(color = colors.line)
-            Spacer(Modifier.height(10.dp))
-            StatusLine("链路", peerStateText(linkState), if (linkState is PeerState.Failed) colors.danger else colors.ink2)
-            StatusLine(
-                "控制权",
-                when {
-                    isHost -> "房主 · 可控制"
-                    syncStatus.canControl -> "成员 · 可控制"
-                    else -> "成员 · 受控"
-                },
-                if (isHost || syncStatus.canControl) colors.accent else colors.ink2,
-            )
-            StatusLine("片源", sourceStatusText(mediaCheck, isHost), colors.ink2)
-            // 播放同步的三行：房主/成员、锚定状态、偏差。有了它们，「到底同没同步」
-            // 才能在界面上直接读出来，而不是靠听/看猜（2026-11-06 用户报「只校验了哈希」）。
-            StatusLine("同步", syncStatusText(syncStatus), if (syncStatus.linkUp) colors.ink2 else colors.ink3)
-            StatusLine(
-                "偏差",
-                if (syncStatus.isAnchored) "${syncStatus.driftMs} ms · ${syncStatus.tier}" else "-",
-                colors.ink2,
-            )
-            TextButton(onClick = { module.leaveRoom() }) { Text("离开房间") }
         }
-        }
+
+    }
+
+    // 选片浮窗：独立窗口（见 `LibraryPickerDialog` 的注释），放在 Row 之外 ——
+    // 它不参与本页布局，也不能因为 `fullscreen` 把画面挤走。
+    if (picking) {
+        LibraryPickerDialog(
+            movies = movies,
+            currentPath = movie?.path,
+            onPick = {
+                picking = false
+                onSelectMovie(it)
+            },
+            onOpenFile = {
+                picking = false
+                onOpenFile()
+            },
+            onDismiss = { picking = false },
+        )
     }
 }
 
+// ── 右侧栏的三张卡（房间成员 / 通话 / 影片）──────────────────────────────────
+
+/** 卡片外壳：与设置页的 `Panel` 同一套视觉（描边 + 圆角 + 标题行）。 */
 @Composable
-private fun MemberRow(
+private fun HallCard(
+    title: String,
+    subtitle: String? = null,
+    trailing: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val colors = LocalCinemaColors.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, colors.line2, RoundedCornerShape(12.dp))
+            .background(colors.surface, RoundedCornerShape(12.dp))
+            .padding(12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(title, style = MaterialTheme.typography.titleSmall, color = colors.ink)
+            if (subtitle != null) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.ink3,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (trailing != null) {
+                Spacer(Modifier.weight(1f))
+                trailing()
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        content()
+    }
+}
+
+/**
+ * 一路音量（复刻安卓简洁模式「通话」卡里的那两行）：
+ * 「麦克风输入音量 100%」+ 图标 + 滑条。
+ */
+@Composable
+private fun VolumeRow(
+    label: String,
+    value: Float,
+    icon: String,
+    enabled: Boolean = true,
+    onChange: (Float) -> Unit,
+) {
+    val colors = LocalCinemaColors.current
+    Text(
+        "$label  ${(value * 100).roundToInt()}%",
+        style = MaterialTheme.typography.labelSmall,
+        color = colors.ink2,
+    )
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(icon, color = colors.ink2, style = MaterialTheme.typography.bodyMedium)
+        Slider(
+            value = value,
+            onValueChange = onChange,
+            enabled = enabled,
+            modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+        )
+    }
+}
+
+// 四列的固定宽度。名字用 `weight(1f)` 吃掉剩下的空间 —— 名字长短不同也不会把
+// 后面三列挤偏，这正是「一行一个人」的表格最要紧的一点。
+private val MEMBER_CTRL_COLUMN = 62.dp
+private val MEMBER_MIC_COLUMN = 44.dp
+private val MEMBER_STATE_COLUMN = 46.dp
+
+@Composable
+private fun MemberHeader() {
+    val colors = LocalCinemaColors.current
+    Row(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+        Text("成员", Modifier.weight(1f), color = colors.ink3, style = MaterialTheme.typography.labelSmall)
+        Text("控制", Modifier.width(MEMBER_CTRL_COLUMN), color = colors.ink3, style = MaterialTheme.typography.labelSmall)
+        Text("状态", Modifier.width(MEMBER_STATE_COLUMN), color = colors.ink3, style = MaterialTheme.typography.labelSmall)
+        Text("麦", Modifier.width(MEMBER_MIC_COLUMN), color = colors.ink3, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+/**
+ * 成员表的一行（复刻安卓端 `RoomMembersSection` 的四列）。
+ *
+ * 四列：名字（自己高亮）/ 控制权（房主看到开关）/ 麦克风 / 状态。
+ * 自己那一行**不给开关**：房主拨自己的控制权没有意义，而「自己拨自己」在两人房里
+ * 会让人误以为对面也被关了。
+ */
+@Composable
+private fun MemberTableRow(
     member: Member,
-    isHost: Boolean,
+    isHostOfRoom: Boolean,
     isMe: Boolean,
     myNickname: String,
-    awaitingSource: Boolean,
+    allow: Boolean,
+    canSwitch: Boolean,
+    micOn: Boolean,
+    onSetAllowed: (Boolean) -> Unit,
 ) {
     val colors = LocalCinemaColors.current
     Row(
-        Modifier
-            .fillMaxWidth()
-            .background(colors.surface, RoundedCornerShape(8.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth().padding(vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            Modifier
-                .size(7.dp)
-                .background(if (member.online) colors.success else colors.ink3, CircleShape),
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            member.nickname.ifBlank {
-                if (isMe && myNickname.isNotBlank()) myNickname else member.userId.value.take(8)
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (member.online) colors.ink else colors.ink3,
-            fontWeight = if (isMe) FontWeight.SemiBold else FontWeight.Normal,
-        )
-        Spacer(Modifier.width(6.dp))
-        if (isHost) Badge("房主", colors.accent)
-        if (isMe) Badge("我", colors.ink3)
-        Spacer(Modifier.weight(1f))
-        Text(
-            when {
-                !member.online -> "离线"
-                awaitingSource -> "等片源"
-                else -> "在看"
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = colors.ink3,
-        )
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(7.dp)
+                    .background(if (member.online) colors.success else colors.ink3, CircleShape),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                member.nickname.ifBlank {
+                    if (isMe && myNickname.isNotBlank()) myNickname else member.userId.value.take(8)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                // 自己那一行靠**名字高亮**认出来（2026-11-07 用户口径），不再挂「我」徽标。
+                color = when {
+                    isMe -> colors.accent
+                    member.online -> colors.ink
+                    else -> colors.ink3
+                },
+                fontWeight = if (isMe) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (isHostOfRoom) {
+                Spacer(Modifier.width(4.dp))
+                Badge("房主", colors.accent)
+            }
+        }
+        Box(Modifier.width(MEMBER_CTRL_COLUMN), contentAlignment = Alignment.CenterStart) {
+            if (canSwitch) {
+                Box(Modifier.size(width = 40.dp, height = 24.dp), contentAlignment = Alignment.Center) {
+                    Switch(
+                        checked = allow,
+                        onCheckedChange = onSetAllowed,
+                        modifier = Modifier.scale(0.66f),
+                    )
+                }
+            } else {
+                Text(
+                    when {
+                        // 房主自己那格不显示「受控」：它恒为可控制，写两个字反而像被限制了。
+                        isMe && isHostOfRoom -> "—"
+                        allow -> "可"
+                        else -> "受控"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (allow || (isMe && isHostOfRoom)) colors.accent else colors.ink3,
+                )
+            }
+        }
+        // 列顺序对齐安卓简洁模式：成员 / 控制 / 状态 / 麦。
+        Box(Modifier.width(MEMBER_STATE_COLUMN)) {
+            Text(
+                if (member.online) "在线" else "离线",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (member.online) colors.ink2 else colors.ink3,
+            )
+        }
+        Box(Modifier.width(MEMBER_MIC_COLUMN), contentAlignment = Alignment.CenterStart) {
+            Text(
+                "🎤",
+                style = MaterialTheme.typography.labelSmall,
+                // 开麦用主色、关麦用灰色：同一枚图标，靠颜色区分状态（安卓端也是这么画的）。
+                color = if (micOn) colors.accent else colors.ink3.copy(alpha = 0.45f),
+            )
+        }
     }
 }
 
@@ -1020,5 +1124,415 @@ private fun copyToClipboard(text: String) {
     runCatching {
         Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(text), null)
         Log.info("[cinema] 已复制：$text")
+    }
+}
+
+// ── 舞台右侧栏的两个「非在房」态 ────────────────────────────────────────────
+//
+// 这两个面板是 `ConnectPanel` / `LobbyPanel` 的**窄版**（380dp 一列）。
+// 宽版仍然留在文件里：`--screen=cinema` 的门禁截图与「全屏铺满」的历史布局用的是它，
+// 换成窄版会把那一整页的排版判据推翻。产品路径（本机看片）走的是这两个。
+
+@Composable
+private fun ConnectSidePanel(
+    endpoint: String,
+    onEndpointChange: (String) -> Unit,
+    connecting: Boolean,
+    error: String?,
+    onConnect: () -> Unit,
+) {
+    val colors = LocalCinemaColors.current
+    Text("影厅", style = MaterialTheme.typography.headlineSmall, color = colors.ink)
+    Spacer(Modifier.height(6.dp))
+    Text(
+        "还没连信令服务器。连上之后才能建房或加入房间；只在本机看电影不用连。",
+        style = MaterialTheme.typography.bodySmall,
+        color = colors.ink2,
+    )
+    Spacer(Modifier.height(16.dp))
+    OutlinedTextField(
+        value = endpoint,
+        onValueChange = onEndpointChange,
+        label = { Text("信令服务地址") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Spacer(Modifier.height(6.dp))
+    Text(
+        "默认 $DEFAULT_SIGNAL_ENDPOINT。自建服务器填它的地址，例如 ws://192.168.1.10:8080。",
+        style = MaterialTheme.typography.labelSmall,
+        color = colors.ink3,
+    )
+    Spacer(Modifier.height(14.dp))
+    Button(onClick = onConnect, enabled = !connecting, modifier = Modifier.fillMaxWidth()) {
+        Text(if (connecting) "连接中…" else "连接信令服务器")
+    }
+    if (error != null) {
+        Spacer(Modifier.height(10.dp))
+        Text(error, color = colors.danger, style = MaterialTheme.typography.bodySmall)
+    }
+    Spacer(Modifier.height(18.dp))
+    HorizontalDivider(color = colors.line)
+    Spacer(Modifier.height(12.dp))
+    Text(
+        "不连也能看片：左侧「打开文件」或「从影片库选片」可以直接放。",
+        style = MaterialTheme.typography.labelSmall,
+        color = colors.ink3,
+    )
+}
+
+@Composable
+private fun LobbySidePanel(
+    module: DesktopModule,
+    signalState: SignalState,
+    nickname: String,
+    onDisconnect: () -> Unit,
+    connectError: String?,
+) {
+    val colors = LocalCinemaColors.current
+    val scope = rememberCoroutineScope()
+
+    var roomCode by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    var lastError by remember { mutableStateOf<String?>(null) }
+
+    var rooms by remember { mutableStateOf<List<RoomSummary>?>(null) }
+    var roomsLoading by remember { mutableStateOf(false) }
+    var roomsError by remember { mutableStateOf<String?>(null) }
+
+    // 有密码的房间：点「加入」先问密码，再走同一条 join。
+    var askingFor by remember { mutableStateOf<RoomSummary?>(null) }
+    var askingPassword by remember { mutableStateOf("") }
+
+    suspend fun loadRooms() {
+        roomsLoading = true
+        roomsError = null
+        runCatching { module.signaler.listRooms() }
+            .onSuccess { rooms = it }
+            .onFailure { roomsError = friendlySignalError(it) }
+        roomsLoading = false
+    }
+
+    LaunchedEffect(signalState) {
+        if (signalState is SignalState.Online && module.signaler.room.value == null) loadRooms()
+    }
+
+    fun act(success: String, block: suspend () -> Unit) {
+        scope.launch {
+            busy = true
+            lastError = null
+            notice = null
+            runCatching { block() }
+                .onSuccess { notice = success }
+                .onFailure { lastError = friendlySignalError(it) }
+            busy = false
+        }
+    }
+
+    /**
+     * 点房间卡的「加入」。
+     *
+     * 用户口径（2026-11-07）：**无密码直接进房**，有密码才弹输入框。
+     * 所以原来那颗「选中」（先填到输入框、再让用户点一次「加入房间」）被拆成了
+     * 两条路径 —— 房间卡自己就是入口，不再需要两步。
+     */
+    fun join(summary: RoomSummary, secret: String?) {
+        module.handler.localNickname = nickname
+        act("已加入房间 ${summary.roomId}") {
+            module.signaler.joinRoom(summary.roomId, nickname, secret?.takeIf { it.isNotBlank() })
+        }
+    }
+
+    Text("大厅", style = MaterialTheme.typography.headlineSmall, color = colors.ink)
+    Spacer(Modifier.height(2.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(signalStateText(signalState), style = MaterialTheme.typography.labelMedium, color = colors.ink3)
+        Spacer(Modifier.weight(1f))
+        TextButton(onClick = onDisconnect) { Text("断开") }
+    }
+    if (connectError != null) {
+        Text(connectError, style = MaterialTheme.typography.bodySmall, color = colors.danger)
+    }
+    Spacer(Modifier.height(10.dp))
+
+    OutlinedTextField(
+        value = nickname,
+        onValueChange = {},
+        // 房间里显示的名字 = **账号昵称**（2026-11-07 用户口径）：
+        // 这一格原来能让用户自己改，于是同一台机器在大厅改一次、在房间成员表里
+        // 又是另一个名字，对端分不清谁是谁。现在只读，改名字去设置 → 账号。
+        label = { Text("昵称（账号昵称）") },
+        singleLine = true,
+        readOnly = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Spacer(Modifier.height(12.dp))
+    HorizontalDivider(color = colors.line)
+    Spacer(Modifier.height(12.dp))
+
+    Text("建房", style = MaterialTheme.typography.titleSmall, color = colors.ink)
+    Spacer(Modifier.height(6.dp))
+    OutlinedTextField(
+        value = roomCode,
+        onValueChange = { roomCode = it.uppercase().filter { c -> !c.isWhitespace() } },
+        label = { Text("房间号（6 位，留空 = 随机）") },
+        singleLine = true,
+        isError = roomCode.isNotEmpty() && !isRoomCode(roomCode),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = password,
+        onValueChange = { password = it },
+        label = { Text("密码（可留空）") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Spacer(Modifier.height(10.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Button(
+            enabled = !busy && (roomCode.isEmpty() || isRoomCode(roomCode)),
+            onClick = {
+                module.handler.localNickname = nickname
+                act("已创建房间") {
+                    val created = module.signaler.createRoom(
+                        nickname = nickname,
+                        password = password.takeIf { it.isNotBlank() },
+                        roomId = roomCode.takeIf { it.isNotBlank() },
+                    )
+                    copyToClipboard(created.roomId)
+                }
+            },
+        ) { Text("创建房间") }
+        OutlinedButton(
+            enabled = !busy && isRoomCode(roomCode),
+            onClick = {
+                module.handler.localNickname = nickname
+                act("已加入房间") {
+                    module.signaler.joinRoom(roomCode, nickname, password.takeIf { it.isNotBlank() })
+                }
+            },
+        ) { Text("按房号加入") }
+    }
+    if (roomCode.isNotEmpty() && !isRoomCode(roomCode)) {
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "房号必须 6 位，且不含 0 / O / 1 / I / L。",
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.danger,
+        )
+    }
+    if (busy) {
+        Spacer(Modifier.height(6.dp))
+        Text("处理中…", style = MaterialTheme.typography.labelSmall, color = colors.ink3)
+    }
+    if (notice != null) {
+        Spacer(Modifier.height(8.dp))
+        Text(notice!!, style = MaterialTheme.typography.bodySmall, color = colors.success)
+    }
+    if (lastError != null) {
+        Spacer(Modifier.height(8.dp))
+        Text(lastError!!, style = MaterialTheme.typography.bodySmall, color = colors.danger)
+    }
+
+    Spacer(Modifier.height(14.dp))
+    HorizontalDivider(color = colors.line)
+    Spacer(Modifier.height(12.dp))
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("当前房间", style = MaterialTheme.typography.titleSmall, color = colors.ink)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            if (roomsLoading) "拉取中…" else "${rooms?.size ?: 0} 个",
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.ink3,
+        )
+        Spacer(Modifier.weight(1f))
+        TextButton(enabled = !roomsLoading, onClick = { scope.launch { loadRooms() } }) { Text("刷新") }
+    }
+    if (roomsError != null) {
+        Text(roomsError!!, style = MaterialTheme.typography.bodySmall, color = colors.danger)
+    } else if (rooms.isNullOrEmpty()) {
+        Text(
+            if (signalState is SignalState.Online) {
+                "现在没有开着的房间。建房之后把房号念给对方。"
+            } else {
+                "连上信令服务器之后才会列出房间。"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.ink3,
+        )
+    } else {
+        rooms!!.forEach { summary ->
+            RoomRow(
+                summary = summary,
+                onJoin = {
+                    if (summary.hasPassword) {
+                        askingPassword = ""
+                        askingFor = summary
+                    } else {
+                        join(summary, null)
+                    }
+                },
+                enabled = !busy,
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+
+    askingFor?.let { target ->
+        AlertDialog(
+            onDismissRequest = { askingFor = null },
+            title = { Text("房间 ${target.roomId} 需要密码") },
+            text = {
+                OutlinedTextField(
+                    value = askingPassword,
+                    onValueChange = { askingPassword = it },
+                    label = { Text("房间密码") },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val secret = askingPassword
+                        askingFor = null
+                        join(target, secret)
+                    },
+                ) { Text("加入") }
+            },
+            dismissButton = { TextButton(onClick = { askingFor = null }) { Text("取消") } },
+        )
+    }
+}
+
+/**
+ * 从影片库选片（浮窗）。
+ *
+ * 用 [DialogWindow] 而不是 material3 的 `AlertDialog`：影厅页的画面是 `SwingPanel`
+ * 里的 AWT heavyweight `Canvas`，Compose 画的应用内浮层会被它整个盖住（同一条
+ * 已实测的限制，见 `PlayerPane` 类注释）。独立窗口不受这条限制。
+ */
+@Composable
+private fun LibraryPickerDialog(
+    movies: List<DesktopMovie>,
+    currentPath: String?,
+    onPick: (DesktopMovie) -> Unit,
+    onOpenFile: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = LocalCinemaColors.current
+    var query by remember { mutableStateOf("") }
+    val filtered = remember(movies, query) {
+        val q = query.trim()
+        if (q.isEmpty()) {
+            movies
+        } else {
+            movies.filter { it.title.contains(q, ignoreCase = true) || it.fileName.contains(q, ignoreCase = true) }
+        }
+    }
+
+    DialogWindow(
+        onCloseRequest = onDismiss,
+        state = rememberDialogState(size = DpSize(900.dp, 640.dp)),
+        title = "从影片库选片",
+        resizable = true,
+    ) {
+        Column(Modifier.fillMaxSize().background(colors.background).padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("搜索片名") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(10.dp))
+                OutlinedButton(onClick = onOpenFile) { Text("打开文件…") }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                if (movies.isEmpty()) "影片库还是空的 —— 先去「影片库」页添加根目录并扫描。" else "共 ${filtered.size} 部",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.ink3,
+            )
+            Spacer(Modifier.height(10.dp))
+            if (filtered.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(if (movies.isEmpty()) "影片库是空的" else "没有匹配的影片", color = colors.ink3)
+                }
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 148.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxSize(),
+                ) {
+                    gridItems(filtered, key = { it.path }) { movie ->
+                        PickerCard(
+                            movie = movie,
+                            current = movie.path == currentPath,
+                            onPick = { onPick(movie) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PickerCard(movie: DesktopMovie, current: Boolean, onPick: () -> Unit) {
+    val colors = LocalCinemaColors.current
+    val cover = rememberCover(movie)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (current) colors.accent.copy(alpha = 0.14f) else colors.surface2)
+            .border(
+                width = if (current) 2.dp else 0.dp,
+                color = if (current) colors.accent else Color.Transparent,
+                shape = RoundedCornerShape(10.dp),
+            )
+            .clickable(onClickLabel = "选择这部片", onClick = onPick),
+    ) {
+        Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
+            if (cover != null) {
+                Image(
+                    bitmap = cover,
+                    contentDescription = movie.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Box(
+                    Modifier.fillMaxSize().background(colors.accent.copy(alpha = 0.10f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        movie.title.take(1).uppercase(),
+                        color = colors.accent.copy(alpha = 0.55f),
+                        style = MaterialTheme.typography.titleLarge,
+                    )
+                }
+            }
+        }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
+            Text(
+                movie.title,
+                color = colors.ink,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                if (movie.durationMs > 0) formatDuration(movie.durationMs) else "时长待解析",
+                color = colors.ink3,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
     }
 }
