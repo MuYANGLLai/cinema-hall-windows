@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -58,6 +59,27 @@ fun AppDialogWindow(
         val colors = LocalCinemaColors.current
         // 无边框之后窗口自己不会动了：拖动/缩放的入口都在 WindowChrome 上。
         val chrome = remember(window) { WindowChrome(window, onClose) }
+
+        // ── 交互交给 Windows（与主窗口同一套，见 NativeFrame）─────────────────
+        // 弹窗只有一颗关闭键、也不该被最大化，所以 captionButtons=1 / maximizable=false。
+        // 重试是因为刚 compose 时对话框的 peer 可能还没建好（取不到 HWND）。
+        LaunchedEffect(window) {
+            var tries = 0
+            while (tries < 20) {
+                val ok = chrome.installNative(
+                    captionButtons = 1,
+                    resizable = resizable,
+                    maximizable = false,
+                    minWidth = 560,
+                    minHeight = 400,
+                )
+                if (ok) break
+                tries++
+                delay(50)
+            }
+        }
+        // 弹窗关掉时必须把 WndProc 换回去：回调比窗口活得久会让进程直接崩。
+        DisposableEffect(window) { onDispose { chrome.disposeNative() } }
 
         // ── 摆到主窗口正中 ────────────────────────────────────────────────────
         // Compose 的默认位置是「屏幕居中」，而主窗口只占屏幕的一块 —— 结果弹窗

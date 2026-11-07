@@ -46,6 +46,7 @@ import javax.imageio.ImageIO
  * --exit-after=<sec>    跑 N 秒后自动退出（冒烟/门禁脚本用）
  * --screenshot=<path>   退出前抓一张窗口截图（同上）
  * --fullscreen          启动即全屏（同上：脚本按不了 F11）
+ * --native-frame=0      关掉「窗口交互交给 Windows」，退回自绘拖动/缩放（真机排障用）
  * ```
  */
 fun main(args: Array<String>) {
@@ -65,6 +66,9 @@ fun main(args: Array<String>) {
     if (args.contains("--audio-helper")) runAudioHelper()
 
     val options = StartupOptions.parse(args)
+    // 无边框窗口的**交互**是否交给 Windows（用户 2026-11-07 拍板「选 A」）。
+    // 关掉就退回自绘拖动/缩放/双击 —— 留给真机出问题时的现场退路。
+    com.cinemahall.desktop.app.ui.NativeFrame.enabled = options.nativeFrame
     AppPaths.ensure()
     Log.init(File(AppPaths.logsDir, "app.log"))
     Log.info("启动 ${options.describe()} · ${AppPaths.describe()}")
@@ -347,8 +351,31 @@ fun main(args: Array<String>) {
                 }
             }
             var savedBounds by remember { mutableStateOf<java.awt.Rectangle?>(null) }
+
+            // ── 把窗口的交互交给 Windows（拖动 / 八向缩放 / 双击最大化 / 贴边吸附）──
+            // 外观一点不动（仍是 undecorated + 自绘标题栏），只借系统的**行为**。
+            // 重试：`LaunchedEffect` 第一次跑时 peer 可能还没建好，取不到 HWND。
+            LaunchedEffect(composeWindow) {
+                var tries = 0
+                while (tries < 20) {
+                    if (chrome.installNative()) break
+                    tries++
+                    delay(50)
+                }
+            }
+            // 原生接管后 `maximized` 由系统发起（贴边吸附/双击/Win+↑）：`WindowChrome`
+            // 自己挂了 `componentResized` 去刷 `IsZoomed`，这里不用再管。
+
             LaunchedEffect(fullscreen) {
+                // 全屏期间不接受拖动/拉边（系统独占全屏也是这样）。
+                com.cinemahall.desktop.app.ui.NativeFrame.setFullscreen(composeWindow, fullscreen)
                 if (fullscreen) {
+                    // 系统最大化状态下改 `bounds` 是**无效**的：先还原成普通窗口。
+                    // 还原是走 `SendMessage(SC_RESTORE)`，AWT 的 componentResized 稍后才到，
+                    // 所以等一拍再读 bounds，否则存下来的「原始尺寸」其实是最大化那一份，
+                    // 退出全屏就回不到原来的大小。
+                    chrome.restoreIfZoomed()
+                    if (chrome.nativeFrame) delay(80)
                     savedBounds = composeWindow.bounds
                     val screen = runCatching {
                         composeWindow.graphicsConfiguration.bounds
@@ -411,6 +438,10 @@ fun main(args: Array<String>) {
                         // ⚠️ 这里**不能**用 `Thread.sleep`：它冻住 EDT，浮层的首帧画不出来，
                         // 截出来的就是一块没画完的窗口。
                         delay(600)
+                        // 原生交互自检：`probe` 走的是**真实 WndProc**（`SendMessage(WM_NCHITTEST)`），
+                        // 所以「标题栏能不能拖、边缘能不能拉」在没有鼠标的情况下也能判死。
+                        Log.info("[native] 截图前复核 ${com.cinemahall.desktop.app.ui.NativeFrame.describe(window)}")
+                        Log.info("[native] 截图前命中 ${com.cinemahall.desktop.app.ui.NativeFrame.probe(window)}")
                         // 悬浮控制条只对鼠标有反应，而截图脚本按不了鼠标 —— 门禁给它一条
                         // 直接入口。先叫出来，再等它真的画出第一帧（ComposePanel 首次
                         // 布局要几百毫秒），最后重新计时一次，别让 2.5 秒在快门那一瞬收回。
@@ -548,6 +579,14 @@ private data class StartupOptions(
      * 截图里永远看不到它，也就没法验证「浮在画面上」这件事。
      */
     val hoverCenter: Boolean,
+    /**
+     * 无边框窗口的交互是否交给 Windows（默认 true）。
+     *
+     * `--native-frame=0` 关掉：拖动/八向缩放/双击最大化全部退回自绘那一套。
+     * 留在参数里是为了真机出问题时的现场退路 —— 钩子写坏会让窗口拖不动，
+     * 那种 bug 在自动化里看不出来（见 `NativeFrame` 的说明）。
+     */
+    val nativeFrame: Boolean,
     /** C5 自检用的固定房号。 */
     val roomId: String,
     val rtcPort: Int,
@@ -559,7 +598,7 @@ private data class StartupOptions(
             "rtcSelfTest=${rtcSelfTest ?: "-"} rtcCallTest=${rtcCallTest ?: "-"} " +
             "rtcTone=$rtcTone roomTest=${roomTest ?: "-"} sessionTest=${sessionTest ?: "-"} " +
             "roomId=$roomId screen=${initialScreen ?: "home"} cinemaCreate=$cinemaCreate " +
-            "fullscreen=$startFullscreen hoverCenter=$hoverCenter " +
+            "fullscreen=$startFullscreen hoverCenter=$hoverCenter nativeFrame=$nativeFrame " +
             "cinemaJoin=${cinemaJoin ?: "-"} identity=${identity ?: "-"} " +
             "activate=${activateCode != null} deviceName=${deviceName ?: "-"} " +
             "nickname=${nickname ?: "-"} " +
@@ -587,6 +626,8 @@ private data class StartupOptions(
                 initialScreen = value("--screen")?.takeIf { it.isNotBlank() },
                 startFullscreen = args.contains("--fullscreen"),
                 hoverCenter = args.contains("--hover-center"),
+                // 默认开：无边框窗口的拖动/缩放/最大化交给系统。
+                nativeFrame = value("--native-frame")?.trim() != "0",
                 cinemaCreate = args.contains("--cinema-create"),
                 cinemaJoin = value("--cinema-join")?.takeIf { it.isNotBlank() },
                 identity = value("--identity")?.takeIf { it.isNotBlank() },
