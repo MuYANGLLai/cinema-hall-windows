@@ -1,6 +1,8 @@
 package com.cinemahall.desktop.app.ui
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -569,19 +571,29 @@ fun AppRoot(
             // 切页用**带方向**的淡入淡出（2026-11-08 视觉升级）：新的往右侧偏一点点浮上来、
             // 旧的快速让位。曲线取 `Motion.emphasized`（起步陡、收尾长），与所有微交互同源；
             // 位移只有 1/28 与 1/40 屏宽 —— 大到能感觉到「换了一页」，小到不会晃眼。
+            //
+            // ⚠️ 影厅页**不参与过渡**（2026-11-08 实测）：那一页里的画面是 libVLC 直接画在
+            // AWT 重量级 `Canvas` 上的，它不跟 Compose 的位移/透明度走 —— 实测切到影厅时
+            // 画面留在原地、右栏跟着滑到一边，中间空出一条亮色竖缝（截图 `trans_03_mid`）。
+            // 而且过渡期间新旧两页会同时存在，两块 `PlayerPane` 抢同一个 `controller.surface`。
+            // 所以只要有一边是影厅就直接换页，不做过渡。
             AnimatedContent(
                 targetState = screen,
                 transitionSpec = {
-                    val forward = targetState.ordinal >= initialState.ordinal
-                    val enter = fadeIn(Motion.curve(Motion.STANDARD)) +
-                        slideInHorizontally(Motion.curve(Motion.ENTRANCE)) { w ->
-                            if (forward) w / 28 else -w / 28
-                        }
-                    val leave = fadeOut(Motion.curve(Motion.MICRO, Motion.exit)) +
-                        slideOutHorizontally(Motion.curve(Motion.MICRO, Motion.exit)) { w ->
-                            if (forward) -w / 40 else w / 40
-                        }
-                    enter togetherWith leave
+                    if (targetState == Screen.Cinema || initialState == Screen.Cinema) {
+                        EnterTransition.None togetherWith ExitTransition.None
+                    } else {
+                        val forward = targetState.ordinal >= initialState.ordinal
+                        val enter = fadeIn(Motion.curve(Motion.STANDARD)) +
+                            slideInHorizontally(Motion.curve(Motion.ENTRANCE)) { w ->
+                                if (forward) w / 28 else -w / 28
+                            }
+                        val leave = fadeOut(Motion.curve(Motion.MICRO, Motion.exit)) +
+                            slideOutHorizontally(Motion.curve(Motion.MICRO, Motion.exit)) { w ->
+                                if (forward) -w / 40 else w / 40
+                            }
+                        enter togetherWith leave
+                    }
                 },
                 label = "screen",
             ) { targetScreen ->
