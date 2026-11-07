@@ -87,6 +87,12 @@ class PlaybackOverlay(
         val moved = lastPointer != p
         lastPointer = p
         if (!moved) return
+        // 主窗口最小化/隐藏时，指针在桌面上的任何移动都不该把控制条叫出来
+        // （见 [ownerUsable]）。收回已经显示的那一块，别让它留在桌面上。
+        if (!ownerUsable()) {
+            if (isVisible) hideNow()
+            return
+        }
         val rect = videoScreenRect()
         if (pollLogged < 2) {
             pollLogged++
@@ -94,6 +100,23 @@ class PlaybackOverlay(
         }
         if (rect == null || !rect.contains(p)) return
         poke("hover")
+    }
+
+    /**
+     * 主窗口此刻「真的能看见」吗？
+     *
+     * ⚠️ 这里**不能**只看 `video.panel.isShowing`：窗口被最小化之后它仍然是 true
+     * （`isShowing` 只表示「在显示树里且 visible 标记为真」，与窗口是否被系统收进
+     * 任务栏无关）。旧版就是靠这一条判断的，于是出现了用户报的现象 ——
+     * **影厅页最小化之后，在桌面上挪一下鼠标，悬浮控制条会自己冒出来**：
+     * 那时画面矩形还是最小化之前的坐标，指针恰好划过就命中了。
+     */
+    private fun ownerUsable(): Boolean {
+        val w = owner() ?: return false
+        if (!w.isVisible) return false
+        if (w is java.awt.Frame && (w.extendedState and java.awt.Frame.ICONIFIED) != 0) return false
+        if (w is java.awt.Dialog && !w.isShowing) return false
+        return runCatching { video.panel.isShowing }.getOrDefault(false)
     }
 
     /**
@@ -106,8 +129,7 @@ class PlaybackOverlay(
      * 窗口是无边框的，两者之间没有标题栏/边框的 inset，不需要额外补偿。
      */
     private fun videoScreenRect(): Rectangle? {
-        val showing = runCatching { video.panel.isShowing }.getOrDefault(false)
-        if (!showing) return null
+        if (!ownerUsable()) return null
         val w = owner() ?: return null
         val rel = runCatching { SwingUtilities.convertPoint(video.panel, 0, 0, w) }.getOrNull() ?: return null
         val loc = runCatching { w.location }.getOrNull() ?: return null
@@ -135,6 +157,18 @@ class PlaybackOverlay(
         override fun componentHidden(e: ComponentEvent) = hideNow()
     }
 
+    /**
+     * 最小化要**当场**收回，不能等下一次轮询。
+     *
+     * 轮询是 120ms 一次，而最小化动画本身有 150~200ms —— 靠轮询的话，用户能看到
+     * 控制条先跟着窗口消失、又在桌面上闪一下。这里直接挂窗口状态监听。
+     */
+    private val stateWatch = object : java.awt.event.WindowStateListener {
+        override fun windowStateChanged(e: java.awt.event.WindowEvent) {
+            if (e.newState and java.awt.Frame.ICONIFIED != 0) hideNow()
+        }
+    }
+
     private val isVisible: Boolean get() = window?.isVisible == true
 
     /** 装内容。只调一次（见类注释第 3 段的说明）。 */
@@ -157,7 +191,7 @@ class PlaybackOverlay(
     /** 鼠标动一下就出来，并重新开始计时。 */
     fun poke(reason: String = "manual") {
         if (disposed || broken) return
-        val panelShowing = runCatching { video.panel.isShowing }.getOrDefault(false)
+        val panelShowing = ownerUsable()
         if (!panelShowing) {
             hideNow()
             return
@@ -202,6 +236,7 @@ class PlaybackOverlay(
         trackTimer.stop()
         hoverPoll.stop()
         runCatching { window?.let { owner()?.removeComponentListener(ownerWatch) } }
+        runCatching { window?.let { (owner() as? java.awt.Frame)?.removeWindowStateListener(stateWatch) } }
         runCatching { window?.isVisible = false }
         runCatching { window?.dispose() }
         window = null
@@ -240,6 +275,7 @@ class PlaybackOverlay(
         content?.let { panel.setContent(it) }
         w.contentPane.add(panel, BorderLayout.CENTER)
         holder?.addComponentListener(ownerWatch)
+        (holder as? java.awt.Frame)?.addWindowStateListener(stateWatch)
         window = w
         return w
     }
@@ -255,7 +291,7 @@ class PlaybackOverlay(
     private fun syncBounds() {
         val w = window ?: return
         if (disposed) return
-        val showing = runCatching { video.panel.isShowing }.getOrDefault(false)
+        val showing = ownerUsable()
         if (!showing) {
             hideNow()
             return

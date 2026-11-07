@@ -156,8 +156,6 @@ fun PlayerPane(
             bar.durationMs = target.durationMs
             bar.playing = target.isPlaying
             bar.buffering = target.isBuffering
-            bar.subtitles = target.subtitleLanguages
-            bar.subtitleIndex = target.currentSubtitleIndex
             error = target.playbackError
             delay(250)
         }

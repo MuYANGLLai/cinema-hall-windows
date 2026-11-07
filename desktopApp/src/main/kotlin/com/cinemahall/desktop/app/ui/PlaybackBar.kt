@@ -54,8 +54,9 @@ class PlaybackBarState {
 
     /** 倍速**不轮询**：它只由用户在这一条上选，播放器不会自己改。 */
     var speed by mutableStateOf(1f)
-    var subtitles by mutableStateOf<List<String>>(emptyList())
-    var subtitleIndex by mutableStateOf(-1)
+
+    // 字幕选择**不在控制条上**（2026-11-08 用户口径）：它挪到影厅右栏的「影片」卡片里，
+    // 与控制条同一套「跟着片子走」的语义。控制条只留播放相关的动作。
 
     // ── 拖动进度条时的临时态（拖的过程中不要被轮询顶回去）────────────────────
     var dragging by mutableStateOf(false)
@@ -246,12 +247,6 @@ fun PlaybackBar(
                     }
                 }
 
-                SubtitleMenu(
-                    target = target,
-                    subtitles = state.subtitles,
-                    selected = state.subtitleIndex,
-                )
-
                 state.onManualSync?.let { sync ->
                     TextButton(onClick = sync) {
                         Text("同步", color = colors.ink2, style = MaterialTheme.typography.labelMedium)
@@ -295,56 +290,3 @@ private fun CheckSlot(checked: Boolean) {
 
 private fun formatSpeedLabel(speed: Float): String =
     if (kotlin.math.abs(speed - speed.toInt()) < 0.01f) "${speed.toInt()}×" else "${speed}×"
-
-/**
- * 字幕菜单。
- *
- * ── 「关闭字幕」为什么必须显式有一项（2026-11-06）──────────────────────────────
- * 之前只有「字幕 1/2/3…」，选中之后**没有任何视觉反馈**（菜单不标当前项），
- * 而关掉内封字幕的唯一办法是把片子从头拖一遍 —— 用户报的「不能选使用哪条字幕」
- * 有一半是这件事：他看不到自己选中了没有。
- *
- * 现在：当前项打勾、第一项是「关闭字幕」，并且选择动作会写日志（见
- * `VlcPlaybackTarget.applySubtitle`），点不动时 app.log 里有据可查。
- */
-@Composable
-fun SubtitleMenu(
-    target: VlcPlaybackTarget,
-    subtitles: List<String>,
-    selected: Int,
-) {
-    val colors = LocalCinemaColors.current
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        TextButton(onClick = { expanded = true }, enabled = subtitles.isNotEmpty()) {
-            Text(
-                if (subtitles.isEmpty()) "无字幕" else "字幕 ${selected + 1}/${subtitles.size}",
-                color = colors.ink2,
-                style = MaterialTheme.typography.labelMedium,
-                maxLines = 1,
-                softWrap = false,
-            )
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(
-                leadingIcon = { CheckSlot(selected < 0) },
-                text = { Text("关闭字幕") },
-                onClick = {
-                    expanded = false
-                    target.disableSubtitles()
-                },
-            )
-            subtitles.forEachIndexed { index, label ->
-                val text = if (label.isBlank()) "字幕 ${index + 1}（未标语言）" else "字幕 ${index + 1}（$label）"
-                DropdownMenuItem(
-                    leadingIcon = { CheckSlot(index == selected) },
-                    text = { Text(text) },
-                    onClick = {
-                        expanded = false
-                        target.selectSubtitleTrack(index)
-                    },
-                )
-            }
-        }
-    }
-}

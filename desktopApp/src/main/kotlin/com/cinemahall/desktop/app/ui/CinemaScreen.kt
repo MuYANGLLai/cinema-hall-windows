@@ -4,6 +4,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -148,6 +149,7 @@ fun CinemaScreen(
                 onSelectMovie = onSelectMovie,
             ) {
                 ConnectSidePanel(
+                    controller = controller,
                     endpoint = endpoint,
                     onEndpointChange = onEndpointChange,
                     connecting = connecting,
@@ -196,6 +198,7 @@ fun CinemaScreen(
             ) {
                 LobbySidePanel(
                     module = module,
+                    controller = controller,
                     signalState = signalState,
                     nickname = nickname,
                     onDisconnect = onDisconnect,
@@ -377,6 +380,10 @@ private fun HallPanel(
 
     val isHost = room.hostUserId == module.myUserId
     val listening = !isHost && mediaCheck.verdict is MediaCheck.Mismatch
+
+    // 字幕轨跟着「当前这部片」：轮询一次给「影片」卡用（2026-11-08 用户口径：
+    // 字幕选择从悬浮控制条挪到这里，与安卓简洁模式一致）。没有内封文字轨时整行不画。
+    val subtitleState = rememberSubtitleState(controller.target)
 
     // ── 同步引擎必须拿到播放器 ────────────────────────────────────────────────
     // `attachPlayback` 是幂等的（同一个播放器只建一个引擎），它同时补设角色与已知的片源摘要。
@@ -630,6 +637,11 @@ private fun HallPanel(
                         Button(onClick = { picking = true }) { Text("片库") }
                         OutlinedButton(onClick = onClearMovie, enabled = movie != null) { Text("清除影片") }
                     }
+                    // 字幕：跟着选中的片走，没有内封文字轨时整行不出现（与安卓端一致）。
+                    if (subtitleState.hasTracks) {
+                        Spacer(Modifier.height(10.dp))
+                        SubtitleTrackRow(target = controller.target, state = subtitleState)
+                    }
                 }
 
                 Spacer(Modifier.height(6.dp))
@@ -669,10 +681,20 @@ private fun HallCard(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = LocalCinemaColors.current
+    // 悬浮时描边从分隔线过渡到主色 28%（2026-11-08 视觉升级）：卡片本身不可点，
+    // 所以只做「靠近时有回应」，不做抬起 —— 抬起会让人以为能点。
+    val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val hover = hoverProgress(interaction)
+    val border = androidx.compose.ui.graphics.lerp(
+        colors.line2,
+        colors.accent.copy(alpha = 0.28f),
+        hover,
+    )
     Column(
         Modifier
             .fillMaxWidth()
-            .border(1.dp, colors.line2, RoundedCornerShape(12.dp))
+            .hoverable(interaction)
+            .border(1.dp, border, RoundedCornerShape(12.dp))
             .background(colors.surface, RoundedCornerShape(12.dp))
             .padding(12.dp),
     ) {
@@ -1134,6 +1156,7 @@ private fun copyToClipboard(text: String) {
 
 @Composable
 private fun ConnectSidePanel(
+    controller: PlayerController,
     endpoint: String,
     onEndpointChange: (String) -> Unit,
     connecting: Boolean,
@@ -1178,11 +1201,19 @@ private fun ConnectSidePanel(
         style = MaterialTheme.typography.labelSmall,
         color = colors.ink3,
     )
+
+    // 字幕：本机看片也要能选字幕轨；没有内封文字轨时整张卡不画。
+    val subs = rememberSubtitleState(controller.target)
+    if (subs.hasTracks) {
+        Spacer(Modifier.height(14.dp))
+        HallCard(title = "字幕") { SubtitleTrackRow(controller.target, subs, showLabel = false) }
+    }
 }
 
 @Composable
 private fun LobbySidePanel(
     module: DesktopModule,
+    controller: PlayerController,
     signalState: SignalState,
     nickname: String,
     onDisconnect: () -> Unit,
@@ -1404,6 +1435,13 @@ private fun LobbySidePanel(
             },
             dismissButton = { TextButton(onClick = { askingFor = null }) { Text("取消") } },
         )
+    }
+
+    // 字幕：没进房也能挑（本机看片同样要选字幕轨）。没有内封文字轨时整张卡不画。
+    val subs = rememberSubtitleState(controller.target)
+    if (subs.hasTracks) {
+        Spacer(Modifier.height(14.dp))
+        HallCard(title = "字幕") { SubtitleTrackRow(controller.target, subs, showLabel = false) }
     }
 }
 

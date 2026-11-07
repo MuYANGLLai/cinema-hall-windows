@@ -20,7 +20,7 @@ kotlin {
  * 就出现了「zip 叫 0.1.1、包里是 0.1.2」的包：只有版本号变了而名字没变，
  * 发出去没人能一眼看出是哪一版。现在两处都读它，改名只改这一行。
  */
-val winVersion = "0.1.17"
+val winVersion = "0.1.18"
 
 dependencies {
     implementation(project(":desktop:media"))
@@ -41,6 +41,9 @@ dependencies {
 
     implementation(compose.desktop.currentOs)
     implementation(compose.material3)
+    // 动效：`AnimatedContent` / `AnimatedVisibility` 在 compose.animation 里，
+    // 而 foundation 只带 animation-core（只有 animate*AsState）。2026-11-08 视觉升级用。
+    implementation(compose.animation)
 
     // 托盘/防休眠要走 AWT + JNA（JNA 由 vlcj 传递，但桌面模块要直接 import 它，
     // 所以显式声明 —— 不依赖“恰好被谁带进来”）。

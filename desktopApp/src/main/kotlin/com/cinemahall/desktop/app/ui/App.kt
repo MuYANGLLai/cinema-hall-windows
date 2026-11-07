@@ -1,8 +1,15 @@
 package com.cinemahall.desktop.app.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -49,7 +56,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -513,15 +522,26 @@ fun AppRoot(
             // `--screen=diagnostics` 那条门禁路径还要用它。
             NAV_ENTRIES.forEach { entry ->
                 val selected = screen == entry
+                val interaction = remember(entry) { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                val hover = hoverProgress(interaction)
+                val press = pressProgress(interaction)
+                // 选中态与悬浮态都走颜色过渡（`Motion.MICRO`），不是硬切。
+                // 悬浮底色按 hover 进度插值：移进移出都有一小段「淡进淡出」，
+                // 这是「高级感」里最便宜也最见效的一条。
+                val fill = if (selected) {
+                    colors.accent.copy(alpha = 0.14f)
+                } else {
+                    colors.ink.copy(alpha = 0.06f * hover)
+                }
+                // 选中项左侧那一小段主色横杠：位置与高度都固定，只做透明度过渡，
+                // 不给布局添任何变量。
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .padding(vertical = 3.dp)
-                        .background(
-                            if (selected) colors.accent.copy(alpha = 0.14f) else Color.Transparent,
-                            RoundedCornerShape(10.dp),
-                        )
-                        .clickable { screen = entry }
+                        .hapticLift(hover = hover * if (selected) 0f else 1f, press = press, lift = 1)
+                        .background(fill, RoundedCornerShape(10.dp))
+                        .clickable(interactionSource = interaction, indication = null) { screen = entry }
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -546,7 +566,26 @@ fun AppRoot(
 
         // ── 内容 ─────────────────────────────────────────────────────────────
         Box(Modifier.weight(1f).fillMaxHeight()) {
-            when (screen) {
+            // 切页用**带方向**的淡入淡出（2026-11-08 视觉升级）：新的往右侧偏一点点浮上来、
+            // 旧的快速让位。曲线取 `Motion.emphasized`（起步陡、收尾长），与所有微交互同源；
+            // 位移只有 1/28 与 1/40 屏宽 —— 大到能感觉到「换了一页」，小到不会晃眼。
+            AnimatedContent(
+                targetState = screen,
+                transitionSpec = {
+                    val forward = targetState.ordinal >= initialState.ordinal
+                    val enter = fadeIn(Motion.curve(Motion.STANDARD)) +
+                        slideInHorizontally(Motion.curve(Motion.ENTRANCE)) { w ->
+                            if (forward) w / 28 else -w / 28
+                        }
+                    val leave = fadeOut(Motion.curve(Motion.MICRO, Motion.exit)) +
+                        slideOutHorizontally(Motion.curve(Motion.MICRO, Motion.exit)) { w ->
+                            if (forward) -w / 40 else w / 40
+                        }
+                    enter togetherWith leave
+                },
+                label = "screen",
+            ) { targetScreen ->
+            when (targetScreen) {
                 Screen.Home -> HomeScreen(
                     onGoCinema = { screen = Screen.Cinema },
                 )
@@ -643,6 +682,7 @@ fun AppRoot(
                     )
                 }
             }
+            }
         }
     }
     }
@@ -702,18 +742,41 @@ private class HomeEntry(
 @Composable
 private fun EntryCard(entry: HomeEntry, modifier: Modifier) {
     val colors = LocalCinemaColors.current
+    val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val hover = hoverProgress(interaction)
+    val press = pressProgress(interaction)
+    // 悬浮：描边从「几乎看不见的分隔线」过渡到主色 45%，整张卡抬起 3dp 并带一点点阴影；
+    // 按下：缩到 0.985。三件事都只动绘制（graphicsLayer / shadow），不碰布局。
+    // 图标方块跟着 hover 放大 6% —— 就是那种「磁吸」手感。
+    val borderColor = androidx.compose.ui.graphics.lerp(
+        colors.line,
+        colors.accent.copy(alpha = 0.45f),
+        hover,
+    )
     Column(
         modifier
+            .hapticLift(hover = hover, press = press, lift = 3)
             .aspectRatio(1f)
+            .shadow(
+                elevation = (1f + 9f * hover).dp,
+                shape = RoundedCornerShape(16.dp),
+                ambientColor = Color.Black.copy(alpha = 0.55f),
+                spotColor = Color.Black.copy(alpha = 0.55f),
+            )
             .clip(RoundedCornerShape(16.dp))
             .background(colors.surface2)
-            .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-            .clickable(onClickLabel = entry.title, onClick = entry.onClick)
+            .border(1.dp, borderColor, RoundedCornerShape(16.dp))
+            .clickable(interactionSource = interaction, indication = null, onClickLabel = entry.title, onClick = entry.onClick)
             .padding(16.dp),
     ) {
         Box(
             Modifier
                 .size(42.dp)
+                .graphicsLayer {
+                    val s = 1f + 0.06f * hover
+                    scaleX = s
+                    scaleY = s
+                }
                 .clip(RoundedCornerShape(12.dp))
                 .background(colors.accent.copy(alpha = 0.14f)),
             contentAlignment = Alignment.Center,
@@ -906,10 +969,22 @@ private fun Panel(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = LocalCinemaColors.current
+    // 与影厅的三张卡同一套手感：靠近时描边淡入主色（不可点，所以不抬起）。
+    val panelInteraction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val panelHover = hoverProgress(panelInteraction)
     Column(
         modifier
             .fillMaxWidth()
-            .border(1.dp, colors.line2, RoundedCornerShape(12.dp))
+            .hoverable(panelInteraction)
+            .border(
+                1.dp,
+                androidx.compose.ui.graphics.lerp(
+                    colors.line2,
+                    colors.accent.copy(alpha = 0.28f),
+                    panelHover,
+                ),
+                RoundedCornerShape(12.dp),
+            )
             .background(colors.surface, RoundedCornerShape(12.dp))
             .padding(16.dp),
     ) {

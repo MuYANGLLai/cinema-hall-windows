@@ -1,5 +1,10 @@
 package com.cinemahall.desktop.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -95,16 +100,27 @@ fun AppDialogWindow(
         }
 
         Box(Modifier.fillMaxSize()) {
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .background(colors.background)
-                    // 深色弹窗叠在深色主窗口上时没有边界：补一圈分隔线，否则看起来
-                    // 像是主界面「缺了一块」。
-                    .border(1.dp, colors.line2),
+            // 弹窗进场：0.97 → 1 的缩放 + 淡入（2026-11-08 视觉升级）。
+            // 只在**窗口刚出现**时跑一次；窗口被拖动/缩放不会重放（`MutableTransitionState`
+            // 只在第一次从 false 变 true）。比 M3 默认的「直接出现」轻，也不喧宾夺主。
+            val appear = remember { MutableTransitionState(false).apply { targetState = true } }
+            AnimatedVisibility(
+                visibleState = appear,
+                enter = fadeIn(Motion.curve(Motion.ENTRANCE)) +
+                    scaleIn(initialScale = 0.97f, animationSpec = Motion.curve(Motion.ENTRANCE)),
+                exit = fadeOut(Motion.curve(Motion.MICRO, Motion.exit)),
             ) {
-                DialogTitleBar(chrome, title)
-                Box(Modifier.fillMaxSize()) { content() }
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .background(colors.background)
+                        // 深色弹窗叠在深色主窗口上时没有边界：补一圈分隔线，否则看起来
+                        // 像是主界面「缺了一块」。
+                        .border(1.dp, colors.line2),
+                ) {
+                    DialogTitleBar(chrome, title)
+                    Box(Modifier.fillMaxSize()) { content() }
+                }
             }
             if (resizable) ResizeHandles(chrome, enabled = true)
         }

@@ -611,6 +611,7 @@ class WebRtcBackend : RtcBackend {
         val gap = if (sinkGapCount == 0L) "-" else "%.1f/%.1f".format(sinkGapAvgMs, sinkGapMinMs)
         return "push=$audioPushedFrames track=${track ?: "null"} " +
             "play=${device?.playedFrames ?: 0} dropped=${device?.droppedFrames ?: 0} " +
+            "open=${device?.openAttempts ?: 0} silent=${device?.silenceFrames ?: 0} " +
             "writeFail=$downlinkWriteFails peak=$renderPeak loud=$renderLoudFrames " +
             "gap=$gap attach=$sinkAttachCount sink=[$sinkFormat] note=[$audioNote]"
     }
