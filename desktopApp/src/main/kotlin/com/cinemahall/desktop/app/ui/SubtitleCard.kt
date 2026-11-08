@@ -3,14 +3,13 @@ package com.cinemahall.desktop.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -77,20 +76,28 @@ fun SubtitleTrackRow(
 
     Row(
         modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
+        // ⚠️ 必须 Top 而不是 CenterVertically：胶囊会折行（6 条字幕就是 3 行），
+        // 居中会让「字幕」两个字落在**中间那一行**的左边，看起来像第二个标签。
+        verticalAlignment = Alignment.Top,
     ) {
         if (showLabel) {
             Text(
                 "字幕",
                 style = MaterialTheme.typography.labelSmall,
                 color = colors.ink3,
+                // 与第一行胶囊的文字基线对齐（胶囊上下各有 5dp padding）。
+                modifier = Modifier.padding(top = 6.dp),
             )
             Spacer(Modifier.width(8.dp))
         }
-        Row(
-            Modifier.horizontalScroll(rememberScrollState()),
+        // ── 胶囊换行，不横向滚（2026-11-08 用户口径）────────────────────────────
+        // 原来这一行是 `horizontalScroll`：片子里有 6 条字幕时，右栏只有 360~380dp，
+        // 一屏只放得下 3 条，剩下的要横滑才看得见 —— 用户的原话是「显示不全」。
+        // 改成 `FlowRow` 之后宽度不够就折行，有几条就画几行（外层那栏已经可竖向滚动）。
+        FlowRow(
+            Modifier.weight(1f),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             SubtitleChip(
                 label = "关闭",
@@ -117,13 +124,11 @@ private fun SubtitleChip(label: String, selected: Boolean, onClick: () -> Unit) 
     val interaction = remember { MutableInteractionSource() }
     val hover = hoverProgress(interaction)
     val press = pressProgress(interaction)
-    // 选中项用主色描边 + 主色文字；未选中只有一层很淡的描边。
-    // 颜色都取自现有主题（用户 2026-11-06 口径：主题色不要动，只改控件样式）。
-    val border = if (selected) {
-        colors.accent.copy(alpha = 0.75f)
-    } else {
-        colors.line2.copy(alpha = 0.55f + 0.35f * hover)
-    }
+    // 描边统一走主题的灰色 `line2`（与 `OutlinedButton` 的 outline 同色，
+    // 2026-11-08 用户口径「所有按钮的描边统一成灰色」）。
+    // 选中不再靠改成主色描边，而是靠**文字变主色 + 12% 主色底**——
+    // 这样一排胶囊的边框粗细与颜色完全一致，只有内容是亮的。
+    val border = colors.line2
     val text = when {
         selected -> colors.accent
         else -> colors.ink2

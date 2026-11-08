@@ -517,6 +517,9 @@ private fun HallPanel(
                     .width(360.dp)
                     .fillMaxHeight()
                     .background(colors.surface2)
+                    // ⚠️ 必须能竖向滚：字幕轨一多，「影片」卡里的胶囊会折成好几行
+                    // （见 `SubtitleTrackRow`），这栏本来是固定高度，会把「离开房间」顶出屏幕。
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 14.dp, vertical = 12.dp),
             ) {
                 // 房间号：位置不变，复制做成右侧小图标。
@@ -1285,19 +1288,9 @@ private fun LobbySidePanel(
     if (connectError != null) {
         Text(connectError, style = MaterialTheme.typography.bodySmall, color = colors.danger)
     }
-    Spacer(Modifier.height(10.dp))
-
-    OutlinedTextField(
-        value = nickname,
-        onValueChange = {},
-        // 房间里显示的名字 = **账号昵称**（2026-11-07 用户口径）：
-        // 这一格原来能让用户自己改，于是同一台机器在大厅改一次、在房间成员表里
-        // 又是另一个名字，对端分不清谁是谁。现在只读，改名字去设置 → 账号。
-        label = { Text("昵称（账号昵称）") },
-        singleLine = true,
-        readOnly = true,
-        modifier = Modifier.fillMaxWidth(),
-    )
+    // 昵称那一格删掉（2026-11-08 用户口径）：大厅里再列一遍账号昵称没有用，
+    // 要改名字去「设置 → 账号」。建房/加入房间仍然带着昵称（见上面的 join()），
+    // 只是不再在这一页显示与编辑。
     Spacer(Modifier.height(12.dp))
     HorizontalDivider(color = colors.line)
     Spacer(Modifier.height(12.dp))

@@ -580,8 +580,11 @@ private fun CoverTile(
                 .padding(6.dp)
                 .size(18.dp)
                 .clip(CircleShape)
+                // 勾选圈：描边一律取主题的**灰色** `line2`（与 `OutlinedButton` 的 outline 同色，
+                // 2026-11-08 用户口径「所有按钮描边统一成灰色」）——原来未选中时是白色 60%，
+                // 在一排封面里比别的控件都亮，显得不是一套东西。选中靠底色与对钩区分。
                 .background(if (checked) colors.accent else Color.Black.copy(alpha = 0.45f))
-                .border(1.dp, if (checked) colors.accent else Color.White.copy(alpha = 0.6f), CircleShape)
+                .border(1.dp, colors.line2, CircleShape)
                 .clickable { onToggleSelect() },
             contentAlignment = Alignment.Center,
         ) {
