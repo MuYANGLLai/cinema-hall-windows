@@ -600,6 +600,8 @@ fun AppRoot(
             when (targetScreen) {
                 Screen.Home -> HomeScreen(
                     onGoCinema = { screen = Screen.Cinema },
+                    onOpenFile = { Shortcuts.onOpenFile() },
+                    onGoLibrary = { screen = Screen.Library },
                 )
 
                 Screen.Cinema -> CinemaScreen(
@@ -718,28 +720,57 @@ fun AppRoot(
  * 不重复影片库已经能做的事。
  */
 @Composable
-private fun HomeScreen(onGoCinema: () -> Unit) {
+private fun HomeScreen(
+    onGoCinema: () -> Unit,
+    onOpenFile: () -> Unit,
+    onGoLibrary: () -> Unit,
+) {
     val colors = LocalCinemaColors.current
     Column(
         Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 20.dp),
+            .padding(horizontal = 28.dp, vertical = 24.dp),
     ) {
-        Text("首页", style = MaterialTheme.typography.headlineSmall, color = colors.ink)
+        Text("首页", style = MaterialTheme.typography.headlineMedium, color = colors.ink)
+        Spacer(Modifier.height(2.dp))
         Text("线上影厅 · 桌面端", style = MaterialTheme.typography.labelSmall, color = colors.ink3)
-        Spacer(Modifier.height(20.dp))
-        Text("功能入口", style = MaterialTheme.typography.titleSmall, color = colors.ink2)
-        Spacer(Modifier.height(10.dp))
-        // 卡片宽度定成窗宽的 **1/5**（2026-11-07 用户口径）：现在只有「影厅」一个入口，
-        // 但格子数量已经按五个排好 —— 以后加入口直接往这一行里塞，宽度不会跟着变。
-        // 空位用等宽 Spacer 占着，否则一张卡会横向拉满整屏。
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        Spacer(Modifier.height(26.dp))
+
+        Text("从哪里开始", style = MaterialTheme.typography.titleSmall, color = colors.ink2)
+        Spacer(Modifier.height(12.dp))
+
+        // ── 版式：**一宽两窄**，不是三张等宽卡 ────────────────────────────────
+        // 三张等宽卡是「AI 默认脸」，而且这三个入口的权重本来就不同：「影厅」是主线
+        // （要连人、要选片），另外两个只是辅助入口。所以主线占 2/3 并给到 236dp 高，
+        // 两个辅助入口竖着摞在右边 —— 同样的信息量，读起来有主次。
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
             EntryCard(
-                entry = HomeEntry("影厅", "创建或加入房间，和对方看同一部片", AppIcon.Cinema, onGoCinema),
-                modifier = Modifier.weight(1f),
+                entry = HomeEntry(
+                    "影厅",
+                    "创建或加入房间，和对方看同一部片",
+                    AppIcon.Cinema,
+                    onGoCinema,
+                ),
+                modifier = Modifier.weight(2f).height(236.dp),
+                wide = true,
             )
-            repeat(4) { Spacer(Modifier.weight(1f)) }
+            Column(
+                Modifier.weight(1f).height(236.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                EntryCard(
+                    entry = HomeEntry("打开文件", "直接放本地一部片子", AppIcon.Plus, onOpenFile),
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                )
+                EntryCard(
+                    entry = HomeEntry("影片库", "扫描、分类、抽封面", AppIcon.Library, onGoLibrary),
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                )
+            }
         }
     }
 }
@@ -751,8 +782,14 @@ private class HomeEntry(
     val onClick: () -> Unit,
 )
 
+/**
+ * 首页入口卡。
+ *
+ * [wide] 只影响**内容排版**（图标与文字分上下、底部多一行「进入 →」），不影响交互：
+ * 两种尺寸共用同一套悬浮/按下手感，避免同一页上出现两种「响应速度」。
+ */
 @Composable
-private fun EntryCard(entry: HomeEntry, modifier: Modifier) {
+private fun EntryCard(entry: HomeEntry, modifier: Modifier, wide: Boolean = false) {
     val colors = LocalCinemaColors.current
     val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     val hover = hoverProgress(interaction)
@@ -765,45 +802,69 @@ private fun EntryCard(entry: HomeEntry, modifier: Modifier) {
         colors.accent.copy(alpha = 0.45f),
         hover,
     )
+    val iconBox = if (wide) 46.dp else 34.dp
+    val iconRadius = if (wide) 14.dp else 10.dp
+    val shape = RoundedCornerShape(16.dp)
+
     Column(
         modifier
             .hapticLift(hover = hover, press = press, lift = 3)
-            .aspectRatio(1f)
             .shadow(
                 elevation = (1f + 9f * hover).dp,
-                shape = RoundedCornerShape(16.dp),
+                shape = shape,
                 ambientColor = Color.Black.copy(alpha = 0.55f),
                 spotColor = Color.Black.copy(alpha = 0.55f),
             )
-            .clip(RoundedCornerShape(16.dp))
+            .clip(shape)
             .background(colors.surface2)
-            .border(1.dp, borderColor, RoundedCornerShape(16.dp))
+            .border(1.dp, borderColor, shape)
             .clickable(interactionSource = interaction, indication = null, onClickLabel = entry.title, onClick = entry.onClick)
-            .padding(16.dp),
+            .padding(if (wide) 20.dp else 14.dp),
     ) {
         Box(
             Modifier
-                .size(42.dp)
+                .size(iconBox)
                 .graphicsLayer {
                     val s = 1f + 0.06f * hover
                     scaleX = s
                     scaleY = s
                 }
-                .clip(RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(iconRadius))
                 .background(colors.accent.copy(alpha = 0.14f)),
             contentAlignment = Alignment.Center,
         ) {
-            AppIconView(entry.icon, 22.dp, colors.accent)
+            AppIconView(entry.icon, if (wide) 24.dp else 18.dp, colors.accent)
         }
         Spacer(Modifier.weight(1f))
-        Text(entry.title, style = MaterialTheme.typography.titleMedium, color = colors.ink)
-        Text(
-            entry.caption,
-            style = MaterialTheme.typography.labelSmall,
-            color = colors.ink3,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
+
+        if (wide) {
+            Text(entry.title, style = MaterialTheme.typography.headlineSmall, color = colors.ink)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                entry.caption,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.ink2,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(12.dp))
+            // 唯一的装饰：hover 时「进入」这两个字向右滑 4dp。
+            Text(
+                "进入",
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.accent,
+                modifier = Modifier.graphicsLayer { translationX = 4.dp.toPx() * hover },
+            )
+        } else {
+            Text(entry.title, style = MaterialTheme.typography.titleMedium, color = colors.ink)
+            Text(
+                entry.caption,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.ink3,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 

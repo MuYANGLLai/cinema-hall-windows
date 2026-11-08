@@ -145,6 +145,25 @@ internal object NativeFrame {
         fun callback(hWnd: Pointer?, lParam: Pointer?): Boolean
     }
 
+    // ── dwmapi（Win11 的窗口圆角）────────────────────────────────────────────────
+    internal interface Dwm : Library {
+        fun DwmSetWindowAttribute(hWnd: Pointer?, attr: Int, value: Pointer?, size: Int): Int
+    }
+
+    private val dwm: Dwm? = runCatching {
+        Native.load("dwmapi", Dwm::class.java) as Dwm
+    }.getOrElse {
+        Log.warn("[native] dwmapi 加载失败（窗口不会有圆角）：${it.message}")
+        null
+    }
+
+    /** `DWMWA_WINDOW_CORNER_PREFERENCE`（Win11 22000+）。 */
+    private const val DWMWA_WINDOW_CORNER_PREFERENCE = 33
+
+    /** `DWM_WINDOW_CORNER_PREFERENCE`：0=系统默认、2=圆角、3=直角。 */
+    private const val DWMWCP_ROUND = 2
+
+
     internal interface WndProc : Callback {
         fun callback(hWnd: Pointer?, msg: Int, wParam: Long, lParam: Long): Long
     }
@@ -281,6 +300,9 @@ internal object NativeFrame {
                 )
             }
             hookChildren(api, record)
+            // 圆角最后设：它跟样式位无关，放在前面会被 `SetWindowPos(SWP_FRAMECHANGED)`
+            // 之后的一次重建盖回去（实测只在重建前设会失效）。
+            applyRoundCorners(hwnd)
             true
         }.getOrElse { error ->
             Log.warn("[native] 装配原生交互失败，退回自绘：${error.message}")
@@ -430,6 +452,52 @@ internal object NativeFrame {
         val api = user32 ?: return false
         val record = byWindow[window] ?: return false
         return api.IsZoomed(record.hwnd)
+    }
+
+    /**
+     * 给窗口加 Windows 11 的**原生圆角**（2026-11-08 用户口径「四角倒角平滑」）。
+     *
+     * ── 为什么交给 DWM，而不是自己画 ────────────────────────────────────────────
+     * 自己画只有两条路，两条都不行：
+     *  ① 把窗口设成 per-pixel 半透明、四角画成透明 —— Windows 会因此**丢掉整个
+     *     窗口的阴影**，还得自己补一层假的；
+     *  ② 用 `SetWindowRgn` 抠掉四个角 —— 边缘是**硬锯齿**，正是「倒角不光滑」。
+     * `DWMWA_WINDOW_CORNER_PREFERENCE` 让系统按它自己的圆角半径 + 抗锯齿去裁，
+     * 与资源管理器/记事本逐像素一致，阴影也照常。
+     *
+     * ── 三件必须知道的事 ────────────────────────────────────────────────────────
+     * 1. 只有 Win11（build ≥ 22000）认这个属性；Win10 会返回非 0 的 HRESULT，
+     *    这里就当「没有圆角」放过，不抛。
+     * 2. **最大化时系统按设计给直角**，还原后自动恢复圆角 —— 这是 Windows 自己的
+     *    行为，不要去硬掰（掰了会跟贴边吸附打架）。
+     * 3. 设的时机必须在 `SetWindowPos(SWP_FRAMECHANGED)` **之后**：改样式位会重建
+     *    窗口的非客户区，顺带把圆角偏好重置掉。
+     *
+     * @return 是否真的生效（Win10 / 加载不到 dwmapi 时为 false）。
+     */
+    fun applyRoundCorners(window: Window, round: Boolean = true): Boolean {
+        val hwnd = findHwnd(window, requireTopLevel = window is java.awt.Frame) ?: return false
+        return applyRoundCorners(hwnd, round)
+    }
+
+    private fun applyRoundCorners(hwnd: Pointer, round: Boolean = true): Boolean {
+        val api = dwm ?: return false
+        return runCatching {
+            // 属性值是一个 4 字节枚举，用显式 malloc 比 JNA 的自动映射稳。
+            val buffer = com.sun.jna.Memory(4)
+            buffer.setInt(0, if (round) DWMWCP_ROUND else 0)
+            val hr = api.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, buffer, 4)
+            if (hr != 0) {
+                Log.info("[native] 窗口圆角不受支持（Win10？hr=0x${Integer.toHexString(hr)}）")
+                false
+            } else {
+                Log.info("[native] 窗口圆角已交给 DWM（DWMWCP_ROUND）")
+                true
+            }
+        }.getOrElse { error ->
+            Log.warn("[native] 设置圆角失败：${error.message}")
+            false
+        }
     }
 
     /** 全屏开关：全屏期间不让拖、不让拉边（见 [Installed.fullscreen]）。 */

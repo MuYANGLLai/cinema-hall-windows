@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +22,14 @@ import kotlinx.coroutines.delay
 import androidx.compose.ui.window.DialogWindow
 import androidx.compose.ui.window.rememberDialogState
 import com.cinemahall.desktop.app.LocalCinemaColors
+
+/**
+ * 弹窗内容那圈描边的圆角。
+ *
+ * 必须与 Windows 给这块无边框窗口画的原生圆角（`DWMWCP_ROUND`，本机 ≈8px @100%）对齐：
+ * 不对齐时那条 1dp 描边会从四个角「戳出」圆角之外，看起来像框没包住内容。
+ */
+private const val DIALOG_CORNER_DP = 8
 
 /**
  * 应用里**所有**独立窗口弹层都走这里（2026-11-07 用户口径：弹窗一律无边框）。
@@ -113,10 +122,17 @@ fun AppDialogWindow(
                 Column(
                     Modifier
                         .fillMaxSize()
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(DIALOG_CORNER_DP))
                         .background(colors.background)
                         // 深色弹窗叠在深色主窗口上时没有边界：补一圈分隔线，否则看起来
                         // 像是主界面「缺了一块」。
-                        .border(1.dp, colors.line2),
+                        // 圆角与 Windows 给这块窗口画的原生圆角（`DwmWindowRound`，8dp）
+                        // 对齐 —— 不对齐时那条 1dp 线会在四个角上「戳出」圆角之外。
+                        .border(
+                            1.dp,
+                            colors.line2,
+                            androidx.compose.foundation.shape.RoundedCornerShape(DIALOG_CORNER_DP),
+                        ),
                 ) {
                     DialogTitleBar(chrome, title)
                     Box(Modifier.fillMaxSize()) { content() }

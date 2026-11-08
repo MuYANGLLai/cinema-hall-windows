@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -62,6 +63,13 @@ fun main(args: Array<String>) {
     // 期望 UTF-8 的 MRL/路径。中文文件名能播，就不会因为这条变坏（实测同一部中文名
     // 的片子在改前改后都能起播）。
     System.setProperty("jna.encoding", "UTF-8")
+
+    // ── 缩放时不露白边（2026-11-08 用户口径「快速缩放会看到白白的边」）───────────
+    // AWT 在重绘前会先用窗口自己的底色**擦一遍背景**；擦与「Compose 画出新一帧」
+    // 之间那条刚被拉出来的边，露出的就是这个底色 —— 默认是 **系统白**。
+    // 所以真正要改的是**窗口底色**（见 `window.background = ...`），而不是跳过擦除：
+    // 实测把 `sun.awt.noerasebackground` 设成 true 之后，新拉出来的那块**没有任何人画**，
+    // 露出来的是更刺眼的白（DWM 表面的初始值），反而更糟。
 
     if (args.contains("--audio-helper")) runAudioHelper()
 
@@ -278,6 +286,19 @@ fun main(args: Array<String>) {
         // 这里只保留状态本身。
         var fullscreen by remember { mutableStateOf(options.startFullscreen) }
 
+        // 门禁驱动（见 `--fullscreen-blink` 的说明）：到点自己进一次全屏、3 秒后退出来。
+        // 走的是与 F11 / 控制条那颗按钮完全相同的一条状态分支。
+        LaunchedEffect(options.fullscreenBlinkMs) {
+            val at = options.fullscreenBlinkMs
+            if (at <= 0 || fullscreen) return@LaunchedEffect
+            delay(at.toLong())
+            Log.info("[gate] 全屏门禁：进入")
+            fullscreen = true
+            delay(3_000)
+            Log.info("[gate] 全屏门禁：退出")
+            fullscreen = false
+        }
+
         Window(
             onCloseRequest = {
                 cleanup()
@@ -351,6 +372,25 @@ fun main(args: Array<String>) {
                 }
             }
             var savedBounds by remember { mutableStateOf<java.awt.Rectangle?>(null) }
+            // 启动那次全屏不做遮罩（见下面 `LaunchedEffect(fullscreen)`）。
+            var fullscreenBooted by remember { mutableStateOf(false) }
+
+            // 窗口底色 = 主题背景色（缩放时露出来的边就是它，不再是系统白）。
+            // 换日间/夜间主题时重设一次。
+            LaunchedEffect(composeWindow, settings.theme) {
+                val bg = com.cinemahall.desktop.app.cinemaColorsFor(settings.theme == "day").background
+                val awt = java.awt.Color(bg.toArgb())
+                runCatching {
+                    composeWindow.background = awt
+                    composeWindow.contentPane.background = awt
+                    composeWindow.rootPane.background = awt
+                }.onSuccess {
+                    Log.info(
+                        "[ui] 窗口底色=$awt frame=${composeWindow.background} " +
+                            "content=${composeWindow.contentPane.background}",
+                    )
+                }.onFailure { Log.warn("[ui] 设窗口底色失败：${it.message}") }
+            }
 
             // ── 把窗口的交互交给 Windows（拖动 / 八向缩放 / 双击最大化 / 贴边吸附）──
             // 外观一点不动（仍是 undecorated + 自绘标题栏），只借系统的**行为**。
@@ -369,24 +409,46 @@ fun main(args: Array<String>) {
             LaunchedEffect(fullscreen) {
                 // 全屏期间不接受拖动/拉边（系统独占全屏也是这样）。
                 com.cinemahall.desktop.app.ui.NativeFrame.setFullscreen(composeWindow, fullscreen)
-                if (fullscreen) {
-                    // 系统最大化状态下改 `bounds` 是**无效**的：先还原成普通窗口。
-                    // 还原是走 `SendMessage(SC_RESTORE)`，AWT 的 componentResized 稍后才到，
-                    // 所以等一拍再读 bounds，否则存下来的「原始尺寸」其实是最大化那一份，
-                    // 退出全屏就回不到原来的大小。
-                    chrome.restoreIfZoomed()
-                    if (chrome.nativeFrame) delay(80)
-                    savedBounds = composeWindow.bounds
-                    val screen = runCatching {
-                        composeWindow.graphicsConfiguration.bounds
-                    }.getOrElse { java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds }
-                    composeWindow.bounds = screen
-                } else {
-                    val back = savedBounds
-                    if (back != null) {
-                        composeWindow.bounds = back
+                val day = settings.theme == "day"
+                val veilColor = com.cinemahall.desktop.app.cinemaColorsFor(day).background
+
+                // 换窗口矩形这件事本身（进：铺满显示器；出：回到存下来的那一份）。
+                suspend fun applyBounds() {
+                    if (fullscreen) {
+                        // 系统最大化状态下改 `bounds` 是**无效**的：先还原成普通窗口。
+                        // 还原是走 `SendMessage(SC_RESTORE)`，AWT 的 componentResized 稍后才到，
+                        // 所以等一拍再读 bounds，否则存下来的「原始尺寸」其实是最大化那一份，
+                        // 退出全屏就回不到原来的大小。
+                        chrome.restoreIfZoomed()
+                        if (chrome.nativeFrame) delay(80)
+                        savedBounds = composeWindow.bounds
+                        val screen = runCatching {
+                            composeWindow.graphicsConfiguration.bounds
+                        }.getOrElse {
+                            java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
+                        }
+                        composeWindow.bounds = screen
+                    } else {
+                        val back = savedBounds
+                        if (back != null) {
+                            composeWindow.bounds = back
+                        }
                     }
                 }
+
+                // 启动那一次（`--fullscreen`）不做遮罩：开机就在全屏，没有「切换」这回事，
+                // 硬加一层 300ms 的暗场只会让启动看起来更慢。
+                if (fullscreenBooted) {
+                    com.cinemahall.desktop.app.ui.TransitionVeil.run(
+                        owner = composeWindow,
+                        color = veilColor,
+                    ) {
+                        applyBounds()
+                    }
+                } else {
+                    applyBounds()
+                }
+                fullscreenBooted = true
                 Log.info("[ui] 全屏=$fullscreen bounds=${composeWindow.bounds}")
             }
 
@@ -580,6 +642,15 @@ private data class StartupOptions(
      */
     val hoverCenter: Boolean,
     /**
+     * 门禁用：启动 [fullscreenBlinkMs] 毫秒后进全屏，再过 3 秒退全屏。
+     *
+     * 为什么要这个参数而不是让脚本按 F11：本机 `keybd_event` 注入的 F11 会被
+     * 收到**两次 KeyDown**（实测一次按键触发了两轮 toggle，日志里出现两条遮罩记录、
+     * 状态来回横跳），全屏过渡根本没法稳定复现。这个入口走的是产品同一条
+     * `fullscreen = true` 分支，不绕过任何逻辑。
+     */
+    val fullscreenBlinkMs: Int,
+    /**
      * 无边框窗口的交互是否交给 Windows（默认 true）。
      *
      * `--native-frame=0` 关掉：拖动/八向缩放/双击最大化全部退回自绘那一套。
@@ -626,6 +697,7 @@ private data class StartupOptions(
                 initialScreen = value("--screen")?.takeIf { it.isNotBlank() },
                 startFullscreen = args.contains("--fullscreen"),
                 hoverCenter = args.contains("--hover-center"),
+                fullscreenBlinkMs = value("--fullscreen-blink")?.toIntOrNull() ?: 0,
                 // 默认开：无边框窗口的拖动/缩放/最大化交给系统。
                 nativeFrame = value("--native-frame")?.trim() != "0",
                 cinemaCreate = args.contains("--cinema-create"),

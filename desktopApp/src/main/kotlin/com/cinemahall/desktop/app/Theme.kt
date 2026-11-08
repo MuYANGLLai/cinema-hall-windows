@@ -74,6 +74,16 @@ private val DayColors = CinemaColors(
 
 val LocalCinemaColors = staticCompositionLocalOf { NightColors }
 
+/**
+ * 给**窗口层**（AWT）取一套配色。
+ *
+ * 两个地方要用，而它们都读不到 `LocalCinemaColors`：
+ *  ① 窗口自己的底色 —— 缩放时 Compose 还没画出这一帧的那条边，露出的是 AWT 窗口底色。
+ *     不设的话那是 **AWT 的默认白**，快速拖边就是一条白边；
+ *  ② 全屏过渡遮罩（`TransitionVeil`）要跟当前主题同色。
+ */
+fun cinemaColorsFor(day: Boolean): CinemaColors = if (day) DayColors else NightColors
+
 private fun scheme(colors: CinemaColors, dark: Boolean): ColorScheme {
     val base = if (dark) darkColorScheme() else lightColorScheme()
     return base.copy(
