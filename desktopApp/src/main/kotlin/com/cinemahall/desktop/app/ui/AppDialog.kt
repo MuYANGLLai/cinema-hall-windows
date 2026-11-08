@@ -6,7 +6,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,15 +23,12 @@ import androidx.compose.ui.window.rememberDialogState
 import com.cinemahall.desktop.app.LocalCinemaColors
 
 /**
- * 弹窗内容那圈描边的圆角。
- *
- * 必须与 Windows 给这块无边框窗口画的原生圆角（`DWMWCP_ROUND`，本机 ≈8px @100%）对齐：
- * 不对齐时那条 1dp 描边会从四个角「戳出」圆角之外，看起来像框没包住内容。
- */
-private const val DIALOG_CORNER_DP = 8
-
-/**
  * 应用里**所有**独立窗口弹层都走这里（2026-11-07 用户口径：弹窗一律无边框）。
+ *
+ * ── 外形只有三样东西，内容不要再自己加 ──────────────────────────────────────
+ * ① 圆角由 DWM 裁（`DWMWCP_ROUND`，本机 ≈8px @100%，见 `NativeFrame.applyRoundCorners`）；
+ * ② 边框由 DWM 的阴影给 —— **不要**再画 1dp 描边（0.1.23 用户口径「去掉这条描边」）；
+ * ③ 底色铺**直角矩形**，不要 `clip(圆角)`（见下面 `Column` 上的注释）。
  *
  * ── 为什么不直接用 `DialogWindow` 的默认样式 ────────────────────────────────
  * 默认是系统标题栏 + 系统边框，与主窗口（无边框 + 自绘标题栏）放在一起就是两套外形：
@@ -143,15 +139,11 @@ fun AppDialogWindow(
                         // 圆角外那块区域 Compose 就不画了，露出的是窗口自身的 AWT 白底，
                         // 叠上 DWM 裁出来的圆角弧，看起来就是「四角有纯白半圆」。
                         // 背景铺直角矩形（上面那层 Box 已经在铺），圆角只由 DWM 裁。
-                        .background(colors.background)
-                        // 深色弹窗叠在深色主窗口上时没有边界：补一圈分隔线，否则看起来
-                        // 像是主界面「缺了一块」。描边仍是圆角 —— 弧线之外已被底色填满，
-                        // DWM 再把真正的那四个角裁掉，两者对齐（都是 8dp）。
-                        .border(
-                            1.dp,
-                            colors.line2,
-                            androidx.compose.foundation.shape.RoundedCornerShape(DIALOG_CORNER_DP),
-                        ),
+                        .background(colors.background),
+                    // ⚠️ **不要**再补一圈 1dp 描边（0.1.23 用户口径「去掉这条描边」）：
+                    // 之前为了「深色弹窗叠在深色主窗口上要有边界」补过 colors.line2，
+                    // 实测是一条明显的灰线（(55,56,57)，而底色是 (10,10,11)）。
+                    // 边界感现在来自 DWM 自己的圆角 + 阴影，与资源管理器/记事本一致。
                 ) {
                     DialogTitleBar(chrome, title)
                     Box(Modifier.fillMaxSize()) { content() }
