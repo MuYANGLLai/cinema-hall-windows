@@ -215,6 +215,12 @@ fun PlayerPane(
                 .background(colors.videoBackdrop),
         ) {
             SwingPanel(
+                // ⚠️ `background` 必须显式给，默认是**白**（`Color.White`）。
+                // Compose 会在 `SwingPanel` 里再包一层 JPanel，它的底色就是这个值；
+                // 拖动窗口边框时，那一层会在 Canvas 重画之前先被刷一遍 ——
+                // 于是观众看到的就是「播放器与影厅之间一条白边」，甚至整条接缝发白
+                // （2026-11-08 用户报的就是这个）。给它画面底色，等于把这条缝填成黑的。
+                background = colors.videoBackdrop,
                 factory = { (surface as AwtPlaybackSurface).panel },
                 modifier = Modifier.fillMaxSize(),
             )
