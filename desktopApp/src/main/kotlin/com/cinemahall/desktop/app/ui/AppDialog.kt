@@ -7,7 +7,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,6 +15,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -74,6 +74,23 @@ fun AppDialogWindow(
         // 无边框之后窗口自己不会动了：拖动/缩放的入口都在 WindowChrome 上。
         val chrome = remember(window) { WindowChrome(window, onClose) }
 
+        // ── 窗口自身的底色也必须跟着主题（2026-11-08 用户报「四角有纯白半圆」）──────
+        // 圆角由 DWM 裁，但**裁掉的那四个角之外**仍然是本窗口的界面：窗口自己的
+        // AWT 底色还是系统默认的白，于是四个角露出四块白半圆（截图实测）。
+        // 把窗口/内容/根面板的底色都设成主题色，白半圆就没了。
+        LaunchedEffect(window, colors) {
+            val awt = java.awt.Color(colors.background.toArgb())
+            runCatching {
+                window.background = awt
+                (window as? javax.swing.RootPaneContainer)?.let {
+                    it.contentPane.background = awt
+                    it.rootPane.background = awt
+                }
+            }
+            // 顺带把组件树里所有浅色不透明容器也改深（与主窗口同一套）。
+            Backdrops.watch(window) { awt }
+        }
+
         // ── 交互交给 Windows（与主窗口同一套，见 NativeFrame）─────────────────
         // 弹窗只有一颗关闭键、也不该被最大化，所以 captionButtons=1 / maximizable=false。
         // 重试是因为刚 compose 时对话框的 peer 可能还没建好（取不到 HWND）。
@@ -108,7 +125,7 @@ fun AppDialogWindow(
             window.setLocation(ob.x + (ob.width - w) / 2, ob.y + (ob.height - h) / 2)
         }
 
-        Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().background(colors.background)) {
             // 弹窗进场：0.97 → 1 的缩放 + 淡入（2026-11-08 视觉升级）。
             // 只在**窗口刚出现**时跑一次；窗口被拖动/缩放不会重放（`MutableTransitionState`
             // 只在第一次从 false 变 true）。比 M3 默认的「直接出现」轻，也不喧宾夺主。
@@ -122,12 +139,14 @@ fun AppDialogWindow(
                 Column(
                     Modifier
                         .fillMaxSize()
-                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(DIALOG_CORNER_DP))
+                        // ⚠️ **不要**在这里 `clip(圆角)` 再 `background`（0.1.22 定论）：
+                        // 圆角外那块区域 Compose 就不画了，露出的是窗口自身的 AWT 白底，
+                        // 叠上 DWM 裁出来的圆角弧，看起来就是「四角有纯白半圆」。
+                        // 背景铺直角矩形（上面那层 Box 已经在铺），圆角只由 DWM 裁。
                         .background(colors.background)
                         // 深色弹窗叠在深色主窗口上时没有边界：补一圈分隔线，否则看起来
-                        // 像是主界面「缺了一块」。
-                        // 圆角与 Windows 给这块窗口画的原生圆角（`DwmWindowRound`，8dp）
-                        // 对齐 —— 不对齐时那条 1dp 线会在四个角上「戳出」圆角之外。
+                        // 像是主界面「缺了一块」。描边仍是圆角 —— 弧线之外已被底色填满，
+                        // DWM 再把真正的那四个角裁掉，两者对齐（都是 8dp）。
                         .border(
                             1.dp,
                             colors.line2,

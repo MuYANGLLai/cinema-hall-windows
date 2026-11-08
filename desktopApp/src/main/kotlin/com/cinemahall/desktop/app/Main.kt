@@ -499,6 +499,9 @@ fun main(args: Array<String>) {
 
                 // 启动那一次（`--fullscreen`）与之后的切换走同一条路：都是即时切换。
                 applyBounds()
+                // 改完 bounds 再刷一次 DWM 外观：全屏时那圈 1px 边框正好落在**屏幕四边**，
+                // 不刷掉就是「全屏之后屏幕有一条白描边」（见 NativeFrame.DWMWA_BORDER_COLOR）。
+                com.cinemahall.desktop.app.ui.NativeFrame.refreshDwmLook(composeWindow)
                 Log.info("[ui] 全屏=$fullscreen bounds=${composeWindow.bounds}")
             }
 

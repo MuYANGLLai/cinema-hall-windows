@@ -191,6 +191,9 @@ internal object NativeFrame {
     // ── dwmapi（Win11 的窗口圆角）────────────────────────────────────────────────
     internal interface Dwm : Library {
         fun DwmSetWindowAttribute(hWnd: Pointer?, attr: Int, value: Pointer?, size: Int): Int
+
+        /** 读回用（排障）：确认那圈 1px 边框真的被去掉了。 */
+        fun DwmGetWindowAttribute(hWnd: Pointer?, attr: Int, value: Pointer?, size: Int): Int
     }
 
     private val dwm: Dwm? = runCatching {
@@ -205,6 +208,26 @@ internal object NativeFrame {
 
     /** `DWM_WINDOW_CORNER_PREFERENCE`：0=系统默认、2=圆角、3=直角。 */
     private const val DWMWCP_ROUND = 2
+
+    /**
+     * `DWMWA_BORDER_COLOR`（Win11 22000+）：DWM 在窗口最外圈画的那**1px 边框**。
+     *
+     * ── 这条是「全屏后屏幕有一圈白描边」与「拖动边缘发白」的真凶 ────────────────
+     * 0.1.17 为了把拖动/缩放交给系统，给窗口补了 `WS_CAPTION | WS_THICKFRAME` 等样式位。
+     * 一旦有了这些位，DWM 就把这个窗口当成**带框窗口**对待，会在整圈最外沿画一条 1px
+     * 的边框（颜色由 DWM 按 `DWMWA_COLOR_DEFAULT` 自己定，浅色系下就是一条近白线）。
+     * 它画在**我们所有绘制之上**，所以 Compose 里怎么改颜色都改不掉它 ——
+     * 这正是「窗口底色改成 #0A0A0B 了，边上还是发白」的原因。
+     *
+     * 全屏时窗口铺满显示器，这一圈就正好落在**屏幕四边**，看起来就是「屏幕有一条白描边」。
+     */
+    private const val DWMWA_BORDER_COLOR = 34
+
+    /** `DWMWA_COLOR_NONE`：把这圈边框去掉（不是改成某个颜色，而是不要它）。 */
+    private const val DWMWA_COLOR_NONE = 0xFFFFFFFE.toInt()
+
+    /** `DWMWA_VISIBLE_FRAME_BORDER_THICKNESS`（Win11 22000+）：读回那圈边框现在有多厚。 */
+    private const val DWMWA_VISIBLE_FRAME_BORDER_THICKNESS = 37
 
     // ── gdi32（拖边时的那一下擦除）────────────────────────────────────────────
     /**
@@ -437,9 +460,10 @@ internal object NativeFrame {
             // 实测**无效且更糟** —— 拖边时白照旧，且稳定态就出现 2 万多个透底像素
             // （静态画面都被破坏）。所以不打开；这条路不要再走第二遍。
             hookChildren(api, record)
-            // 圆角最后设：它跟样式位无关，放在前面会被 `SetWindowPos(SWP_FRAMECHANGED)`
-            // 之后的一次重建盖回去（实测只在重建前设会失效）。
-            applyRoundCorners(hwnd)
+            // 圆角与「去掉那圈 1px 边框」最后设：它们跟样式位无关，放在前面会被
+            // `SetWindowPos(SWP_FRAMECHANGED)` 之后的一次非客户区重建盖回去（实测只在
+            // 重建前设会失效）。
+            applyDwmLook(hwnd)
             true
         }.getOrElse { error ->
             Log.warn("[native] 装配原生交互失败，退回自绘：${error.message}")
@@ -640,6 +664,79 @@ internal object NativeFrame {
     fun applyRoundCorners(window: Window, round: Boolean = true): Boolean {
         val hwnd = findHwnd(window, requireTopLevel = window is java.awt.Frame) ?: return false
         return applyRoundCorners(hwnd, round)
+    }
+
+    /**
+     * 把「DWM 负责的那层外观」重设一遍：圆角 + **去掉最外圈那 1px 边框**。
+     *
+     * 为什么要能重设：`SetWindowPos(SWP_FRAMECHANGED)`（改样式位）、系统最大化/还原、
+     * 以及全屏改 `bounds` 都可能让 DWM 重算非客户区，把这两个属性带回默认值。全屏前后
+     * 各刷一次，屏幕四边那条白描边就不会回来。
+     */
+    fun refreshDwmLook(window: Window) {
+        val hwnd = findHwnd(window, requireTopLevel = window is java.awt.Frame) ?: return
+        applyDwmLook(hwnd)
+    }
+
+    private fun applyDwmLook(hwnd: Pointer) {
+        applyRoundCorners(hwnd)
+        applyNoBorder(hwnd)
+    }
+
+    /**
+     * 去掉 DWM 画在窗口最外沿的那一圈 1px 边框（见 [DWMWA_BORDER_COLOR]）。
+     *
+     * Win10 不支持这个属性（返回非 0 HRESULT），当「没有可去掉的」放过。
+     */
+    private fun applyNoBorder(hwnd: Pointer): Boolean {
+        val api = dwm ?: return false
+        return runCatching {
+            // 排障开关：CINEMA_DWM_BORDER=default|none|white|red。
+            // 为什么留它：这条边框在窗口**最外 1px**，而白边门禁一直内缩 16px 统计，
+            // 它从来没被量到过（整整三轮都在别处找白）。有了这个开关就能做 A/B：
+            // 同一段拖动，default 每帧最外圈约 185 个亮像素，none 是 0 ～ 个位数。
+            val probe = System.getenv("CINEMA_DWM_BORDER")?.lowercase()
+            val value = when (probe) {
+                "default" -> 0xFFFFFFFF.toInt()
+                "white" -> 0x00FFFFFF
+                "red" -> 0x000000FF
+                else -> DWMWA_COLOR_NONE
+            }
+            val before = frameBorder(hwnd)
+            val buffer = com.sun.jna.Memory(4)
+            buffer.setInt(0, value)
+            val hr = api.DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, buffer, 4)
+            if (hr != 0) {
+                Log.info("[native] 去掉窗口边框不受支持（Win10？hr=0x${Integer.toHexString(hr)}）")
+                false
+            } else {
+                Log.info(
+                    "[native] 已去掉 DWM 的 1px 窗口边框（${probe ?: "none"} 0x${Integer.toHexString(value)}；" +
+                        "区域厚度 ${before}px → ${frameBorder(hwnd)}px，厚度是保留位、不会变，" +
+                        "变的是这一圈的颜色）",
+                )
+                true
+            }
+        }.getOrElse { error ->
+            Log.warn("[native] 设置边框色失败：${error.message}")
+            false
+        }
+    }
+
+    /**
+     * 读回 DWM 现在给这个窗口画的边框**厚度**（像素）。
+     *
+     * 只用于自证：把「去掉边框」从「我调了那个 API」变成「厚度从 1 变成 0」。
+     * 屏幕抓图在这个栈上对全屏 GPU 画面是黑的（见 `Main.applyBounds` 的注释），
+     * 所以「边缘那条线到底还在不在」只能问 DWM 本身。
+     */
+    private fun frameBorder(hwnd: Pointer): Int {
+        val api = dwm ?: return -1
+        return runCatching {
+            val buffer = com.sun.jna.Memory(4)
+            val hr = api.DwmGetWindowAttribute(hwnd, DWMWA_VISIBLE_FRAME_BORDER_THICKNESS, buffer, 4)
+            if (hr != 0) -1 else buffer.getInt(0)
+        }.getOrElse { -1 }
     }
 
     private fun applyRoundCorners(hwnd: Pointer, round: Boolean = true): Boolean {
