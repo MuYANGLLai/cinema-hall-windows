@@ -48,6 +48,9 @@ import javax.imageio.ImageIO
  * --screenshot=<path>   退出前抓一张窗口截图（同上）
  * --fullscreen          启动即全屏（同上：脚本按不了 F11）
  * --native-frame=0      关掉「窗口交互交给 Windows」，退回自绘拖动/缩放（真机排障用）
+ * --screen-blink=<ms>   切页门禁：N 毫秒后「影厅→影片库→影厅」走一遍，每次切换前后各抓
+ *                       10 帧到 `--screenshot` 同目录（`flip_*.png`）。「闪一下白」只存在
+ *                       几十毫秒，只能靠逐帧抓图判断
  * ```
  */
 fun main(args: Array<String>) {
@@ -81,7 +84,7 @@ fun main(args: Array<String>) {
     // 实测把 `sun.awt.noerasebackground` 设成 true 之后，新拉出来的那块**没有任何人画**，
     // 露出来的是更刺眼的白（DWM 表面的初始值），反而更糟。
 
-    if (args.contains("--audio-helper")) runAudioHelper()
+    if (args.contains("--audio-helper")) runAudioHelper(args.toList())
 
     val options = StartupOptions.parse(args)
     // 无边框窗口的**交互**是否交给 Windows（用户 2026-11-07 拍板「选 A」）。
@@ -305,6 +308,14 @@ fun main(args: Array<String>) {
         val requestFullscreen: (Boolean) -> Unit = { next ->
             fullscreen = next
         }
+
+        /**
+         * 门禁用的「外部切页」通道（`--screen-blink`）。
+         *
+         * `null` = 不干预。非 null 时 `AppRoot` 把页切过去 —— 走的是与点侧栏导航完全
+         * 相同的一条 `screen = ...` 分支，不绕过任何逻辑。
+         */
+        var gateScreen by remember { mutableStateOf<Screen?>(null) }
 
         // 门禁驱动（见 `--fullscreen-blink` 的说明）：到点自己进一次全屏、3 秒后退出来。
         // 走的是与 F11 / 控制条那颗按钮完全相同的一条状态分支。
@@ -536,7 +547,49 @@ fun main(args: Array<String>) {
                     fullscreen = fullscreen,
                     onToggleFullscreen = { requestFullscreen(!fullscreen) },
                     chrome = chrome,
+                    gateScreen = gateScreen,
                 )
+            }
+
+            // 门禁：切页闪白 / 黑屏（`--screen-blink=<ms>`）。
+            //
+            // 「闪一下白」只存在于几十毫秒里：只看落定态永远是好的，必须**逐帧**抓。
+            // 这里在影厅正播着的时候切到影片库、再切回影厅，每次切换前后各抓一串帧，
+            // 帧号与单帧耗时都进日志 —— 于是「白在第几帧、持续多久」可以数出来，
+            // 而不是靠肉眼描述。
+            LaunchedEffect(options.screenBlinkMs) {
+                val at = options.screenBlinkMs
+                if (at <= 0) return@LaunchedEffect
+                val dir = (options.screenshotPath?.parentFile ?: File("_tmp")).apply { mkdirs() }
+                val robot = runCatching { Robot() }.getOrNull()
+                suspend fun burst(tag: String) {
+                    repeat(10) { i ->
+                        val started = System.currentTimeMillis()
+                        val bounds = composeWindow.bounds
+                        val image = withContext(Dispatchers.IO) {
+                            runCatching { robot?.createScreenCapture(bounds) }.getOrNull()
+                        }
+                        if (image != null) {
+                            val name = "flip_${tag}_${i.toString().padStart(2, '0')}.png"
+                            runCatching { ImageIO.write(image, "png", File(dir, name)) }
+                        }
+                        Log.info("[gate] 帧 $tag#$i 耗时=${System.currentTimeMillis() - started}ms")
+                    }
+                }
+                delay(at.toLong())
+                composeWindow.toFront()
+                composeWindow.requestFocus()
+                composeWindow.isAlwaysOnTop = true
+                Log.info("[gate] 切页门禁：影厅 → 影片库")
+                gateScreen = Screen.Library
+                burst("to_lib")
+                delay(1_200)
+                Log.info("[gate] 切页门禁：影片库 → 影厅")
+                gateScreen = Screen.Cinema
+                burst("back")
+                delay(1_500)
+                burst("steady")
+                Log.info("[gate] 切页门禁：结束")
             }
 
             // 冒烟/门禁：跑满 N 秒后抓图并退出（不影响正常使用，只有带参数才生效）。
@@ -704,6 +757,16 @@ private data class StartupOptions(
      */
     val fullscreenBlinkMs: Int,
     /**
+     * 门禁用：`--screen-blink=<ms>` —— 启动 N 毫秒后自己「影厅 → 影片库 → 影厅」走一遍，
+     * 每次切换前后各抓 10 帧到 `--screenshot` 同目录（`flip_*.png`）。
+     *
+     * 为什么要这个参数而不是让脚本注入点击：切页闪白只存在几十毫秒，脚本的
+     * `SetCursorPos + mouse_event` 注入本身就要几十毫秒不确定延迟，抓不到那一帧；
+     * 而且侧栏坐标会随窗口尺寸/缩放变化，脚本得先标定。这个入口走的是产品里
+     * **同一条** `screen = ...` 分支，且切换与抓帧在同一个协程里，时序是确定的。
+     */
+    val screenBlinkMs: Int,
+    /**
      * 门禁用：把窗口的 AWT 组件树（类名 / 背景色 / 尺寸）打进日志。
      *
      * 排查「拖边露白」时靠它定位到底是谁在画白：AWT 在重绘前会拿**各组件自己的背景色**
@@ -759,6 +822,7 @@ private data class StartupOptions(
                 startFullscreen = args.contains("--fullscreen"),
                 hoverCenter = args.contains("--hover-center"),
                 fullscreenBlinkMs = value("--fullscreen-blink")?.toIntOrNull() ?: 0,
+                screenBlinkMs = value("--screen-blink")?.toIntOrNull() ?: 0,
                 dumpTree = args.contains("--dump-tree"),
                 // 默认开：无边框窗口的拖动/缩放/最大化交给系统。
                 nativeFrame = value("--native-frame")?.trim() != "0",

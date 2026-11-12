@@ -132,17 +132,28 @@ fun PlayerPane(
         if (movie != null) {
             val alreadyLoaded = controller.openedPath == movie.path
             if (!alreadyLoaded) {
-                // 先等画面真的有尺寸再装片。`SwingPanel` 刚挂上来的那几十毫秒里 Canvas 是
+                // 先等画面真的有尺寸再装片：`SwingPanel` 刚挂上来的那几十毫秒里 Canvas 是
                 // `0x0`，以这个尺寸建立视频输出，libVLC 的 vout 会按零尺寸初始化、之后不再
                 // 补画（症状是「按了播放没反应」）。等待放在 IO 上，EDT 不阻塞。
-                withContext(Dispatchers.IO) { (surface as? AwtPlaybackSurface)?.awaitReady(4_000) }
+                //
+                // ⚠️ 这里的等待**必须短**（2026-11-12 实测）：`awaitReady` 现在能挂就立刻
+                // 返回（20ms 轮询），上限只是防呆。原来写的是 4 秒，而等待靠的 AWT 事件
+                // 在这条路径上根本不触发 —— 于是每次选片都白等 4 秒，用户报的「片库选完
+                // 好几秒才播放」就是它（日志：进影厅 02.299 → 选片 06.301，整整 4002ms）。
+                val waited = withContext(Dispatchers.IO) {
+                    val started = System.currentTimeMillis()
+                    (surface as? AwtPlaybackSurface)?.awaitReady(2_000)
+                    System.currentTimeMillis() - started
+                }
+                com.cinemahall.desktop.app.Log.info("[player] 画面就绪等待 ${waited}ms，开始装片")
                 controller.open(movie.path, movie.fileName, movie.sizeBytes)
-                delay(300)
+                // 音量不依赖画面，装好片就落下去；起播紧跟其后，中间不再夹 delay ——
+                // 原来那个 300ms 等于让用户白白多等 0.3 秒才看见第一帧。
                 target.setVolume(volume)
+                // 自动起播只在「新装进来」的这一次发生：切页回来时 `autoplay` 还是启动时的
+                // true，照原样再调一次 `play()` 会把用户按下的暂停顶掉。
+                if (autoplay) target.play()
             }
-            // 自动起播只在「新装进来」的这一次发生：切页回来时 `autoplay` 还是启动时的
-            // true，照原样再调一次 `play()` 会把用户按下的暂停顶掉。
-            if (autoplay && !alreadyLoaded) target.play()
         }
     }
 

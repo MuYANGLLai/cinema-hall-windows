@@ -68,6 +68,13 @@ class DesktopModule(
      * （客户端表现为 `Connecting → Reconnecting` 的退避循环，永远到不了建房）。
      */
     private val authToken: () -> String? = { null },
+    /**
+     * 选定的麦克风输入源（`Mixer.Info.name`，null = 系统默认）。来自 `settings.json`。
+     *
+     * 每条链路各自一个采集子进程，所以这里要**记住它**并在 [newLink] 里下发给 helper ——
+     * 否则用户在设置里选了设备，下一次建链又回到系统默认。
+     */
+    private val micInput: String? = null,
 ) {
 
     /** 全进程同源的那条单调时间轴（`System.nanoTime()/1e6`，`core:model` 就是这么定义的）。 */
@@ -173,7 +180,10 @@ class DesktopModule(
         DesktopPeerLink(
             WebRtcBackend(),
             linkDispatcher,
-            uplink = ProcessAudioHelper(Command.audioHelper()),
+            uplink = ProcessAudioHelper(Command.audioHelper()).also {
+                // 采集设备在建链时就定下来：helper 是子进程，起它的那一刻才知道用哪个麦。
+                it.setPreferredInput(selectedMicInput)
+            },
             // AEC 是**原生 APM**，而这条装配现在可能发生在「界面第一次摸链路」的时候 ——
             // 那一刻 native 未必已经加载（`WebRtcEngine.acquire()` 还没跑）。起不来就退回
             // 「无 AEC」：麦克风照用、只是没有回声消除，绝不因为它的初始化把页面打死。
@@ -183,6 +193,25 @@ class DesktopModule(
                 }
                 .getOrNull(),
         ).also { currentLink = it }
+
+    /** 当前选定的麦克风（运行期会被 [setAudioInput] 改掉；建链时下发给 helper）。 */
+    @Volatile
+    private var selectedMicInput: String? = micInput
+
+    /**
+     * 换麦克风输入源（2026-11-12 用户口径：通话卡里的「麦克风」下拉）。
+     *
+     * 只改「记住的那个名字」+ 通知当前链路；持久化由调用方（`AppRoot`）写 `settings.json` ——
+     * 模块不该知道设置文件在哪。
+     */
+    fun setAudioInput(name: String?) {
+        selectedMicInput = name?.takeIf { it.isNotBlank() }
+        currentLink?.setAudioInput(selectedMicInput)
+        Log.info("[rtc] 麦克风输入源 = ${selectedMicInput ?: "系统默认"}")
+    }
+
+    /** 当前选定的麦克风输入源（界面用它显示选中态）。 */
+    val audioInput: String? get() = selectedMicInput
 
     val link: DesktopPeerLink
         get() = currentLink ?: synchronized(linkLock) {

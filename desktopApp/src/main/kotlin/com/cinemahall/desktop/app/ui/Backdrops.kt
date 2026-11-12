@@ -4,7 +4,6 @@ import com.cinemahall.desktop.app.Log
 import java.awt.Component
 import java.awt.Container
 import java.awt.Window
-import java.awt.event.ActionEvent
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.util.Collections
@@ -51,12 +50,14 @@ internal object Backdrops {
      */
     fun watch(window: Window, color: () -> java.awt.Color) {
         apply(window, color())
-        val timer = Timer(800) { event: ActionEvent ->
-            apply(window, color())
-            val source = event.source as? Timer
-            ticks++
-            if (ticks >= 8) source?.stop()
-        }
+        // ── 为什么不能只盯前 8 秒（2026-11-12 实测）──────────────────────────────
+        // 原来是「800ms × 8 次就停」。问题是 `SwingPanel` 那几层容器**不是只在启动时
+        // 出现**：切页时 Compose 会重建 interop 容器，而那一刻它还是出厂白，`Backdrops`
+        // 早就停了，没人再改它 —— 用户看到的就是「切走时播放器区域闪一下白」。
+        // 5Hz 的组件树遍历对这个规模的界面可以忽略（几十个组件、只读背景色），
+        // 所以改成一直盯；而且每次改色都写日志，下一次再出现白底时日志里能直接看到是谁。
+        // 5Hz、永远不停。每次改色都有日志（见 `apply`），所以将来再冒白底能直接看到是谁。
+        val timer = Timer(200) { apply(window, color()) }
         timer.isRepeats = true
         timer.start()
         window.addComponentListener(object : ComponentAdapter() {
@@ -82,8 +83,6 @@ internal object Backdrops {
         })
         Log.info("[ui] 改底色监视已启动（浅色不透明容器 → 主题背景）")
     }
-
-    private var ticks = 0
 
     /** 扫一遍，返回改了几个。 */
     fun apply(window: Window, target: java.awt.Color): Int {

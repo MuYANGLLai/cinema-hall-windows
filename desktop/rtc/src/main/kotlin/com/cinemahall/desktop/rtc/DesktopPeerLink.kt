@@ -21,6 +21,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
 /**
+ * 麦克风增益上限（2026-11-12 用户口径「麦克风输入可以调节到 200%」）。
+ *
+ * 100% = 原样推给发送端；200% = 每个样点 ×2。超过 100% 时**会削顶**（16-bit 满刻度
+ * 就截断），这是增益本身的物理限制 —— 所以界面只在用户明确往上拖时才给到 2.0，
+ * 默认仍是 1.0。只有桌面端放宽：Android 侧的同名端口仍是 0..1。
+ */
+const val MAX_MIC_GAIN: Float = 2f
+
+/**
  * [PeerLink] 的 Windows 实现 —— **W7 C1：状态机骨架**。
  *
  * ── 这一版做了什么、没做什么 ────────────────────────────────────────────────
@@ -353,11 +362,35 @@ class DesktopPeerLink(
             return@post
         }
 
+        startCapture()
+    }
+
+    /**
+     * 换麦克风输入源（2026-11-12 用户口径「点『麦克风』下拉选择输入源」）。
+     *
+     * ── 为什么换设备要停一次采集 ────────────────────────────────────────────────
+     * 采集跑在 `--audio-helper` **子进程**里（设计文档 §3 的硬约束），设备是它启动时
+     * `getMixer()` 定的。改父进程里的一个字段不会让子进程换线，只能 kill 再起 ——
+     * 这与「关麦 = 杀进程」是同一条机制，顺带也是注册表口径正确的做法。
+     *
+     * 没在通话时只记下来：下次 [setCallEnabled] 起采集就用新设备。
+     */
+    fun setAudioInput(name: String?) = post {
+        val device = uplink ?: return@post
+        device.setPreferredInput(name)
+        if (!callRequested) return@post
+        device.stop()
+        _callAudio.update { it.copy(sending = false) }
+        startCapture()
+    }
+
+    /** 起采集并挂音轨（[setCallEnabled] 与 [setAudioInput] 共用这一份）。 */
+    private fun startCapture() {
         val device = uplink
         if (device == null) {
             // 没有装配音频管线：如实说「没有」，不假装在采集。
             _callAudio.update { it.copy(sending = false, error = "本机没有接入音频采集") }
-            return@post
+            return
         }
 
         val started = device.start(
@@ -410,7 +443,7 @@ class DesktopPeerLink(
      * 所以这里是**真增益**：在推给发送端之前把样点按系数缩放。
      */
     override fun setMicVolume(volume: Float) = post {
-        micVolume = volume.coerceIn(0f, 1f)
+        micVolume = volume.coerceIn(0f, MAX_MIC_GAIN)
         refreshCallAudio()
     }
 

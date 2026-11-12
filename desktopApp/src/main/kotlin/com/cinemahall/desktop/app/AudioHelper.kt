@@ -1,8 +1,6 @@
 package com.cinemahall.desktop.app
 
-import javax.sound.sampled.AudioFormat
-import javax.sound.sampled.AudioSystem
-import javax.sound.sampled.DataLine
+import com.cinemahall.desktop.rtc.AudioInputs
 import javax.sound.sampled.TargetDataLine
 
 /**
@@ -20,20 +18,33 @@ import javax.sound.sampled.TargetDataLine
  *  - **stdout 只放 PCM**，一个字节的文本都不能混进去；
  *  - 日志一律走 stderr；
  *  - 父进程死后 stdin 会 EOF —— 必须自杀，否则会留下一个占着麦克风的孤儿。
+ *
+ * ── 采集设备（2026-11-12 用户口径「下拉选麦克风输入源」）───────────────────────
+ * 父进程把 `Mixer.Info.name` 通过 `--audio-input=<name>` 传进来；没传 / 名字已失效
+ * （拔了 USB 麦）就回退系统默认，只在 stderr 留一行 —— **不能因为选错设备就完全没声音**。
  */
-fun runAudioHelper(): Nothing {
+fun runAudioHelper(args: List<String>): Nothing {
     val rate = 48_000
-    val format = AudioFormat(rate.toFloat(), 16, 1, true, false)
-    val info = DataLine.Info(TargetDataLine::class.java, format)
-    if (!AudioSystem.isLineSupported(info)) {
-        System.err.println("[helper] format unsupported: $format")
+    val preferred = args.firstOrNull { it.startsWith("--audio-input=") }
+        ?.removePrefix("--audio-input=")
+        ?.takeIf { it.isNotBlank() }
+
+    val line = AudioInputs.open(preferred)
+    if (line == null) {
+        System.err.println("[helper] 没有可用的采集线（format=${AudioInputs.FORMAT}）")
         kotlin.system.exitProcess(2)
     }
 
-    val line = AudioSystem.getLine(info) as TargetDataLine
-    line.open(format, (rate / 100) * 2 * 4)
+    runCatching { line.open(AudioInputs.FORMAT, (rate / 100) * 2 * 4) }
+        .onFailure {
+            System.err.println("[helper] 打开采集线失败：${it.message}")
+            kotlin.system.exitProcess(2)
+        }
     line.start()
-    System.err.println("[helper] capturing ${rate}Hz mono 16-bit pid=${ProcessHandle.current().pid()}")
+    System.err.println(
+        "[helper] capturing ${rate}Hz mono 16-bit pid=${ProcessHandle.current().pid()} " +
+            "device=${preferred ?: "系统默认"}",
+    )
 
     Thread({
         val stdin = System.`in`

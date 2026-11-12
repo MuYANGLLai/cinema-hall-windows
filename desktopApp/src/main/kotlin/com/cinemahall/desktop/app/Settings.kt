@@ -21,7 +21,7 @@ const val DEFAULT_SIGNAL_ENDPOINT: String = "wss://101.133.234.226:8443/ws"
  * 打包参数，运行期拿不到（`jpackage.app-version` 只在安装器上下文里有）。
  * 发版时两处一起改；不一致的后果只是服务端设备列表里显示旧版本号。
  */
-const val DESKTOP_APP_VERSION: String = "0.1.23"
+const val DESKTOP_APP_VERSION: String = "0.1.24"
 
 /** 上报给服务端的平台标识（与 Android 的 `PLATFORM_ANDROID` 同一套命名）。 */
 const val DESKTOP_PLATFORM: String = "windows"
@@ -38,6 +38,14 @@ data class AppSettings(
     val theme: String = "night",
     /** 影片默认音量，0..1。 */
     val volume: Float = 1f,
+    /**
+     * 选定的麦克风输入源（`Mixer.Info.name`）。null / 空 = 系统默认设备。
+     *
+     * 为什么存名字而不是索引：`AudioSystem.getMixerInfo()` 的顺序会随「插拔 USB 麦」变化，
+     * 存索引等于换一次设备就错位。名字在 Windows 上就是设备全名，稳定。
+     * 设备不在了怎么办：helper 会回退到系统默认并往 stderr 写一行（见 `AudioHelper`）。
+     */
+    val micInput: String? = null,
     /** 播放时阻止系统休眠（W3 要求）。 */
     val keepAwake: Boolean = true,
     /** 上次播放的片子；下次启动显示在「继续观看」。 */

@@ -24,6 +24,14 @@ interface AudioUplink : AutoCloseable {
 
     fun stop()
 
+    /**
+     * 指定采集设备（`Mixer.Info.name`，null = 系统默认）。
+     *
+     * 只是**记下来**：真正生效要等下一次 [start]（采集进程是独立进程，换设备等于重启它）。
+     * 所以调用方在通话中换设备时必须 `stop()` → `start()` 一次，见 `DesktopPeerLink.setAudioInput`。
+     */
+    fun setPreferredInput(name: String?) = Unit
+
     val running: Boolean
 }
 
@@ -54,6 +62,18 @@ class ProcessAudioHelper(
 
     @Volatile
     private var process: Process? = null
+
+    /**
+     * 要用的采集设备（`Mixer.Info.name`）；null = 系统默认。
+     *
+     * 每次 [spawn] 都读一次 —— 换设备必须伴随一次 stop/start，因为采集在**另一个进程**里。
+     */
+    @Volatile
+    private var preferredInput: String? = null
+
+    override fun setPreferredInput(name: String?) {
+        preferredInput = name?.takeIf { it.isNotBlank() }
+    }
 
     @Volatile
     private var reader: Thread? = null
@@ -105,7 +125,12 @@ class ProcessAudioHelper(
         onState: (AudioUplinkState, String?) -> Unit,
         firstBlock: CountDownLatch,
     ): Process {
-        val builder = ProcessBuilder(command)
+        // 设备名作为**追加参数**传下去，而不是拼进 `command`：
+        // `command` 有两种形态（打包态同 exe 自举 / 开发态 java -cp），拼在这里两种都能用。
+        val full = preferredInput?.takeIf { it.isNotBlank() }
+            ?.let { command + "--audio-input=$it" }
+            ?: command
+        val builder = ProcessBuilder(full)
             // PCM 走 stdout（**一个字节的文本都不能混进去**）；helper 的日志一律 stderr。
             .redirectError(ProcessBuilder.Redirect.INHERIT)
         val created = builder.start()

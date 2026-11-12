@@ -55,12 +55,36 @@ class AwtPlaybackSurface : PlaybackSurface {
         if (canvas.isShowing && canvas.width > 0 && canvas.height > 0) readyLatch.countDown()
     }
 
+    /** 「现在这一刻能不能挂视频输出」。挂载与等待共用同一个判据，避免两处漂移。 */
+    fun isReadyNow(): Boolean = canvas.isShowing && canvas.width > 0 && canvas.height > 0
+
     /**
      * 等到画面可以挂视频输出为止。**必须离开 EDT 调用**（它会阻塞），超时返回 false。
+     *
+     * ── 为什么改成主动轮询（2026-11-12 实测「选片后好几秒才起播」）──────────────
+     * 原来这里等的是 `CountDownLatch`，只靠 `componentResized` / `componentShown` 放行。
+     * 实测那两条事件在「容器已经可见时挂上一个尺寸已定好的子组件」这条路径上**不来**，
+     * 于是每次选片都白等到 4 秒超时才继续 —— 用户看到的就是「点了片子，好几秒才动」。
+     * 日志实证：进影厅页 12:35:02.299 → 选片 12:35:06.301，整整 4002ms，而 `attachSurface`
+     * 自己的轮询 50ms 就挂好了。同一个判据、两种实现，一个有事件一个没有，答案就是别等事件。
      *
      * 超时不算错误：调用方继续装片即可（`attachSurface` 自己也在轮询），只是那种情况下
      * 大概率会撞上 libVLC 的 vout 错误 —— 所以调用点仍应在装片前等一次。
      */
-    fun awaitReady(timeoutMs: Long): Boolean =
-        readyLatch.await(timeoutMs, TimeUnit.MILLISECONDS)
+    fun awaitReady(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (isReadyNow()) {
+                readyLatch.countDown()
+                return true
+            }
+            Thread.sleep(POLL_MS)
+        }
+        return isReadyNow().also { if (it) readyLatch.countDown() }
+    }
+
+    private companion object {
+        /** 轮询间隔。20ms ≈ 一帧，用户感觉不到，也不会把 CPU 烧起来。 */
+        const val POLL_MS = 20L
+    }
 }

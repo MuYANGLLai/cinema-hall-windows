@@ -1,5 +1,6 @@
 package com.cinemahall.desktop.app.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,11 +31,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -54,7 +58,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import com.cinemahall.core.media.MediaCheck
@@ -75,6 +81,9 @@ import com.cinemahall.desktop.app.PlayerController
 import com.cinemahall.desktop.app.media.DesktopFileSource
 import com.cinemahall.desktop.app.net.DesktopModule
 import com.cinemahall.desktop.library.DesktopMovie
+import com.cinemahall.desktop.rtc.AudioInputDevice
+import com.cinemahall.desktop.rtc.AudioInputs
+import com.cinemahall.desktop.rtc.MAX_MIC_GAIN
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -129,6 +138,10 @@ fun CinemaScreen(
     onToggleFullscreen: () -> Unit = {},
     /** 「清除影片」（复刻安卓简洁模式影片卡的第二颗按钮）：把当前片卸下来。 */
     onClearMovie: () -> Unit = {},
+    /** 当前选定的麦克风输入源（`Mixer.Info.name`，null = 系统默认）。 */
+    micInput: String? = null,
+    /** 换麦克风输入源。传 null = 用系统默认。 */
+    onSelectMicInput: (String?) -> Unit = {},
 ) {
     val colors = LocalCinemaColors.current
 
@@ -220,6 +233,8 @@ fun CinemaScreen(
                 onClearMovie = onClearMovie,
                 fullscreen = fullscreen,
                 onToggleFullscreen = onToggleFullscreen,
+                micInput = micInput,
+                onSelectMicInput = onSelectMicInput,
             )
         }
     }
@@ -367,6 +382,10 @@ private fun HallPanel(
     onToggleFullscreen: () -> Unit = {},
     /** 「清除影片」（复刻安卓简洁模式影片卡的第二颗按钮）：把当前片卸下来。 */
     onClearMovie: () -> Unit = {},
+    /** 当前选定的麦克风输入源（`Mixer.Info.name`，null = 系统默认）。 */
+    micInput: String? = null,
+    /** 换麦克风输入源。传 null = 用系统默认。 */
+    onSelectMicInput: (String?) -> Unit = {},
 ) {
     val colors = LocalCinemaColors.current
     val callAudio by module.handler.callAudio.collectAsState()
@@ -590,11 +609,16 @@ private fun HallPanel(
                 HallCard(
                     title = "通话",
                     // 与安卓简洁模式一致：开关就在标题右边，不占额外一行。
+                    // 2026-11-12 用户口径：开关**左边**加一颗「麦克风」，点开下拉选输入源。
                     trailing = {
-                        OutlinedButton(
-                            onClick = { module.handler.setCallEnabled(!callAudio.requested, "影厅面板") },
-                        ) {
-                            Text(if (callAudio.requested) "关闭通话" else "开启通话")
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            MicInputPicker(selected = micInput, onSelect = onSelectMicInput)
+                            Spacer(Modifier.width(8.dp))
+                            OutlinedButton(
+                                onClick = { module.handler.setCallEnabled(!callAudio.requested, "影厅面板") },
+                            ) {
+                                Text(if (callAudio.requested) "关闭通话" else "开启通话")
+                            }
                         }
                     },
                 ) {
@@ -610,10 +634,16 @@ private fun HallPanel(
                     Spacer(Modifier.height(4.dp))
                     // 两路音量：本机麦克风增益 + 对端声音。与安卓端同一条口径 ——
                     // 它们都是本机自己的输出/输入，与「谁控制播放」无关，所以始终可调。
+                    //
+                    // 2026-11-12 用户口径（三处一起改）：
+                    // ① 名字不再常驻，悬浮图标才浮出来（见 `VolumeRow`）；
+                    // ② 百分比挪到滑条**后面**；
+                    // ③ 麦克风那一路可推到 200%（`MAX_MIC_GAIN`），接收音量仍是 0..100%。
                     VolumeRow(
                         label = "麦克风输入音量",
                         value = callAudio.micVolume,
                         icon = AppIcon.Mic,
+                        range = 0f..MAX_MIC_GAIN,
                     ) { module.handler.setMicVolume(it) }
                     VolumeRow(
                         label = "接收音量",
@@ -724,31 +754,124 @@ private fun HallCard(
 }
 
 /**
- * 一路音量（复刻安卓简洁模式「通话」卡里的那两行）：
- * 「麦克风输入音量 100%」+ 图标 + 滑条。
+ * 一路音量（2026-11-12 改版）。
+ *
+ * 用户口径三条：
+ *  ① 名字**不再常驻**（原来是一行「麦克风输入音量 100%」），改成**悬浮在图标上**才浮出来；
+ *  ② 百分比挪到滑条**后面**（右边）；
+ *  ③ 麦克风那一路可推到 200%（[range]），接收音量仍是 0..100%。
+ *
+ * 名字用 `TooltipArea` 而不是自绘浮层：它会跟着指针定位、跨平台、也不会被同一行里的
+ * `Slider` 抢走焦点/手势 —— 自己写一套 hover 浮层要处理这两种干扰。
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun VolumeRow(
     label: String,
     value: Float,
     icon: AppIcon,
+    range: ClosedFloatingPointRange<Float> = 0f..1f,
     enabled: Boolean = true,
     onChange: (Float) -> Unit,
 ) {
     val colors = LocalCinemaColors.current
-    Text(
-        "$label  ${(value * 100).roundToInt()}%",
-        style = MaterialTheme.typography.labelSmall,
-        color = colors.ink2,
-    )
     Row(verticalAlignment = Alignment.CenterVertically) {
-        AppIconView(icon, 15.dp, colors.ink2)
+        androidx.compose.foundation.TooltipArea(
+            tooltip = {
+                Surface(
+                    color = colors.surface,
+                    shape = RoundedCornerShape(6.dp),
+                    border = BorderStroke(1.dp, colors.line2),
+                ) {
+                    Text(
+                        label,
+                        color = colors.ink2,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                }
+            },
+            delayMillis = 350,
+            tooltipPlacement = androidx.compose.foundation.TooltipPlacement.CursorPoint(
+                offset = DpOffset(0.dp, 18.dp),
+            ),
+        ) {
+            // 图标本身就是「说明」的入口：悬浮它才显示名字。
+            Box(Modifier.padding(end = 4.dp)) {
+                AppIconView(icon, 15.dp, colors.ink2)
+            }
+        }
         Slider(
-            value = value,
+            value = value.coerceIn(range.start, range.endInclusive),
             onValueChange = onChange,
             enabled = enabled,
+            valueRange = range,
             modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
         )
+        // 百分比在滑条**后面**（用户口径 ②）。等宽，值从 100% 跳到 200% 时滑条不会抖。
+        Text(
+            "${(value * 100).roundToInt()}%",
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.ink2,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(38.dp),
+        )
+    }
+}
+
+/**
+ * 「麦克风」下拉：选采集设备（2026-11-12 用户口径）。
+ *
+ * 设备列表**每次点开都重新枚举**：插拔 USB 麦之后不用重启程序。枚举失败/没有设备时
+ * 依然给出「系统默认」一项 —— 绝不能出现「点了没反应」。
+ */
+@Composable
+private fun MicInputPicker(selected: String?, onSelect: (String?) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    var devices by remember { mutableStateOf<List<AudioInputDevice>>(emptyList()) }
+    Box {
+        OutlinedButton(onClick = {
+            devices = runCatching { AudioInputs.list() }.getOrDefault(emptyList())
+            open = true
+        }) {
+            Text("麦克风")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("系统默认") },
+                onClick = { open = false; onSelect(null) },
+                trailingIcon = { if (selected.isNullOrBlank()) CheckMarkDot() },
+            )
+            devices.forEach { device ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            device.label,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    onClick = { open = false; onSelect(device.name) },
+                    trailingIcon = { if (device.name == selected) CheckMarkDot() },
+                )
+            }
+            if (devices.isEmpty()) {
+                DropdownMenuItem(
+                    text = { Text("没找到可用的麦克风", color = LocalCinemaColors.current.ink3) },
+                    onClick = { open = false },
+                    enabled = false,
+                )
+            }
+        }
+    }
+}
+
+/** 下拉里表示「当前选中的就是这条」的小圆点（不用 ✓ 字体字形，与项目图标口径一致）。 */
+@Composable
+private fun CheckMarkDot() {
+    val colors = LocalCinemaColors.current
+    Box(Modifier.size(14.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(6.dp).background(colors.accent, CircleShape))
     }
 }
 

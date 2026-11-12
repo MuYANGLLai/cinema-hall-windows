@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -115,6 +116,16 @@ enum class Screen(val label: String, val icon: AppIcon) {
  */
 private val NAV_ENTRIES = listOf(Screen.Home, Screen.Cinema, Screen.Library, Screen.Settings)
 
+/**
+ * 不在影厅页时，把影厅页整页挪出窗口的距离。
+ *
+ * 为什么要挪而不是「不组合」：那一页的画面是 libVLC 画在 AWT 重量级 `Canvas` 上的，
+ * 从组合里摘掉就会销毁它的 peer（HWND），libVLC 的视频输出跟着永久失效（见常驻层那段
+ * 说明）。挪到窗口左侧之外，原生子窗口会被主窗口裁掉，既不显示也不影响布局。
+ * 取值只要大到超出任何窗口宽度即可 —— `offset` 是布局位移，不影响这一页自己的测量。
+ */
+private val HIDDEN_SCREEN_X = (-4000).dp
+
 /** 快捷键的落点（窗口级按键在 Main 里接，动作在这里拿）。 */
 object Shortcuts {
     var onPlayPause: () -> Unit = {}
@@ -138,6 +149,16 @@ data class CinemaAuto(val create: Boolean, val roomId: String?)
 class CinemaHolder {
     var module by mutableStateOf<DesktopModule?>(null)
         private set
+
+    /**
+     * 建立新模块时下发给采集子进程的麦克风（`Mixer.Info.name`，null = 系统默认）。
+     *
+     * 为什么是一个字段而不是从 `settings` 里读：本类**不是** Composable，拿不到
+     * `AppRoot` 的参数；而建链这件事发生在按钮回调/自动连接里。由 `AppRoot` 在
+     * 设置变化时把它同步过来（见 `LaunchedEffect(settings.micInput)`）。
+     */
+    @Volatile
+    var micInput: String? = null
 
     /**
      * 还允许「进影厅页自动连一次」。
@@ -165,7 +186,13 @@ class CinemaHolder {
         val mine = accountUserId
             ?: identityOverride?.takeIf { it.isNotBlank() }?.let { UserId(it) }
             ?: DesktopModule.loadOrCreateUserId()
-        val created = DesktopModule(endpoint = endpoint, myUserId = mine, authToken = authToken)
+        val created = DesktopModule(
+            endpoint = endpoint,
+            myUserId = mine,
+            authToken = authToken,
+            // 采集设备跟着设置走：建链时就把选定的麦下发给 helper 子进程。
+            micInput = micInput,
+        )
         // 昵称要在进房之前就交给玩法：`cinema.hello` 里带的就是它。
         created.handler.localNickname = nickname
         created.connect()
@@ -233,6 +260,13 @@ fun AppRoot(
      * 无边框窗口的外壳（标题栏 / 拖边缩放）。null = 没有（门禁截图、未来多窗口）。
      */
     chrome: WindowChrome? = null,
+    /**
+     * 门禁用的外部切页通道（`--screen-blink`）。`null` = 不干预。
+     *
+     * 这里不判断「门禁才允许」，也不做任何额外动作：拿到哪个值就把 `screen` 设成哪个，
+     * 与用户点侧栏导航走的是同一条分支。
+     */
+    gateScreen: Screen? = null,
 ) {
     // ── 账号门（W7-C7）：没有有效 token 就不建模块、不连信令 ──────────────────
     // 生产是 `AUTH_MODE=required`：握手不带 bearer token 会被服务端直接 401，
@@ -246,6 +280,11 @@ fun AppRoot(
     LaunchedEffect(resolvedEndpoint) {
         // 幂等：地址没变且已 Ready 时不会把状态打回 Loading（见 `ensureReady` 的注释）。
         account.ensureReady(resolvedEndpoint)
+    }
+    // 麦克风选择要在**建链之前**就落在 holder 上：`connectCinema` 是普通回调，
+    // 它读不到 settings，只能读 holder 的字段（见 `CinemaHolder.micInput`）。
+    LaunchedEffect(settings.micInput) {
+        cinema.micInput = settings.micInput
     }
 
     when (account.phase) {
@@ -283,7 +322,59 @@ fun AppRoot(
     var autoplay by remember { mutableStateOf(initialAutoplay) }
     var volumeVersion by remember { mutableStateOf(0) }
 
+    /**
+     * 影厅页的画面此刻是不是「已经挪开」。
+     *
+     * 与 `screen` 分开是因为「离开影厅」要**分两步**：先挪画面（露出的是影厅页自己的
+     * 深色底），等 AWT 完整画过一帧之后再换页。理由见 [goTo]。
+     */
+    var hidePlayer by remember { mutableStateOf(false) }
+
     val scope = rememberCoroutineScope()
+
+    /**
+     * 切页的唯一入口（「回影厅」也走它）。
+     *
+     * ── 为什么离开影厅页必须分两步（2026-11-12 门禁实测）────────────────────────
+     * 影厅页的画面是 libVLC 画在一个**原生子窗口**里的，切页时必须把它挪出窗口
+     * （它不能被 Compose 的绘制盖住，也不能从组合里摘掉 —— 见常驻层那段说明）。
+     * 如果「挪走画面」与「换页」发生在同一帧，腾出来的那块区域是 Skia 还没画过的
+     * 缓冲：门禁逐帧抓图实测整帧 **57.9% 是纯 `#FFFFFF`**，只持续 1 帧。
+     *
+     * 分两步之后，那一帧露出的是影厅页自己的深色底（画面区本来就有 `videoBackdrop`），
+     * 下一帧再换页就已经没有「腾空」这件事了。60ms ≈ 4 帧：肉眼察觉不到空白，
+     * 但足够 AWT 完整走一次绘制。
+     */
+    fun goTo(next: Screen) {
+        if (screen == Screen.Cinema && next != Screen.Cinema) {
+            hidePlayer = true
+            scope.launch {
+                delay(60)
+                screen = next
+            }
+        } else {
+            // 回影厅时两件事同一帧做掉：否则会先看到「空的内容区」再看到画面。
+            if (next == Screen.Cinema) hidePlayer = false
+            screen = next
+        }
+    }
+
+    // 每一次换页都留一行：现场日志里必须能对齐「切页发生在哪一刻」，否则
+    // 「切回来黑屏 / 切走闪白」只靠用户描述，无法与 vlc / 挂载日志对时间。
+    LaunchedEffect(screen) {
+        Log.info("[ui] 当前页=$screen")
+        // 只要回到影厅页，画面一定是要显示的。
+        if (screen == Screen.Cinema) hidePlayer = false
+    }
+
+    // 门禁切页通道（`--screen-blink`）：外部塞进来哪个值就切到哪一页。
+    LaunchedEffect(gateScreen) {
+        if (gateScreen != null) {
+            Log.info("[ui] 切页（门禁）→ $gateScreen")
+            goTo(gateScreen)
+        }
+    }
+
     val movies by catalog.movies.collectAsState()
     val roots by catalog.roots.collectAsState()
     val categories by catalog.categories.collectAsState()
@@ -543,7 +634,7 @@ fun AppRoot(
                         .padding(vertical = 3.dp)
                         .hapticLift(hover = hover * if (selected) 0f else 1f, press = press, lift = 1)
                         .background(fill, RoundedCornerShape(10.dp))
-                        .clickable(interactionSource = interaction, indication = null) { screen = entry }
+                        .clickable(interactionSource = interaction, indication = null) { goTo(entry) }
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -568,43 +659,26 @@ fun AppRoot(
 
         // ── 内容 ─────────────────────────────────────────────────────────────
         Box(Modifier.weight(1f).fillMaxHeight()) {
-            // 切页用**带方向**的淡入淡出（2026-11-08 视觉升级）：新的往右侧偏一点点浮上来、
-            // 旧的快速让位。曲线取 `Motion.emphasized`（起步陡、收尾长），与所有微交互同源；
-            // 位移只有 1/28 与 1/40 屏宽 —— 大到能感觉到「换了一页」，小到不会晃眼。
+            val inCinema = screen == Screen.Cinema
+            // ── 影厅页常驻（2026-11-12：两个真机 bug 的同一个根因）──────────────────
+            // 这一页里的画面是 libVLC 直接画在 AWT 重量级 `Canvas` 上的。把它从组合里
+            // 摘掉 = `removeNotify` = **peer 销毁**，切回来时是另一个 HWND
+            // （实测 `hwnd=0x50CB2` → `hwnd=0x90384`）。libVLC 的视频输出还挂在被销毁的
+            // 那个窗口上，而 vlcj / libVLC 都没有「把已经建好的 vout 搬到新窗口」的 API
+            // （实测：`video().setTrack(-1)` 再选回原轨也没用）—— 于是画面永久黑，
+            // 声音与进度照走，正是用户报的那条。
+            // 同一件事还造成「切走时播放器区域闪一下白」：露出来的是 Compose 给
+            // `SwingPanel` 造的那层浅色容器（门禁帧实测整块 `#FFFFFF`，占全帧 58%）。
             //
-            // ⚠️ 影厅页**不参与过渡**（2026-11-08 实测）：那一页里的画面是 libVLC 直接画在
-            // AWT 重量级 `Canvas` 上的，它不跟 Compose 的位移/透明度走 —— 实测切到影厅时
-            // 画面留在原地、右栏跟着滑到一边，中间空出一条亮色竖缝（截图 `trans_03_mid`）。
-            // 而且过渡期间新旧两页会同时存在，两块 `PlayerPane` 抢同一个 `controller.surface`。
-            // 所以只要有一边是影厅就直接换页，不做过渡。
-            AnimatedContent(
-                targetState = screen,
-                transitionSpec = {
-                    if (targetState == Screen.Cinema || initialState == Screen.Cinema) {
-                        EnterTransition.None togetherWith ExitTransition.None
-                    } else {
-                        val forward = targetState.ordinal >= initialState.ordinal
-                        val enter = fadeIn(Motion.curve(Motion.STANDARD)) +
-                            slideInHorizontally(Motion.curve(Motion.ENTRANCE)) { w ->
-                                if (forward) w / 28 else -w / 28
-                            }
-                        val leave = fadeOut(Motion.curve(Motion.MICRO, Motion.exit)) +
-                            slideOutHorizontally(Motion.curve(Motion.MICRO, Motion.exit)) { w ->
-                                if (forward) -w / 40 else w / 40
-                            }
-                        enter togetherWith leave
-                    }
-                },
-                label = "screen",
-            ) { targetScreen ->
-            when (targetScreen) {
-                Screen.Home -> HomeScreen(
-                    onGoCinema = { screen = Screen.Cinema },
-                    onOpenFile = { Shortcuts.onOpenFile() },
-                    onGoLibrary = { screen = Screen.Library },
-                )
-
-                Screen.Cinema -> CinemaScreen(
+            // 所以影厅页**永远留在组合里**；不在当前页时把整页挪到窗口外（offset 为负，
+            // 原生子窗口会被主窗口裁掉，不参与绘制）。peer 不动、vout 不动，切回来原样。
+            // 代价只是这一页一直活着 —— 它本来就在跑引擎与播放状态轮询，不新增线程。
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .offset(x = if (inCinema && !hidePlayer) 0.dp else HIDDEN_SCREEN_X),
+            ) {
+                CinemaScreen(
                     module = cinema.module,
                     endpoint = endpoint,
                     onEndpointChange = { endpoint = it },
@@ -630,7 +704,54 @@ fun AppRoot(
                     },
                     fullscreen = fullscreen,
                     onToggleFullscreen = onToggleFullscreen,
+                    // 麦克风输入源：设置里存的那条 = 当前选中；换设备同时落盘 + 通知链路
+                    // （通话中会重启采集子进程，见 `DesktopModule.setAudioInput`）。
+                    micInput = settings.micInput,
+                    onSelectMicInput = { name ->
+                        onSettingsChange(settings.copy(micInput = name))
+                        cinema.module?.setAudioInput(name)
+                    },
                 )
+            }
+
+            // 其余页仍然走**带方向**的淡入淡出（2026-11-08 视觉升级）：新的往右侧偏一点点
+            // 浮上来、旧的快速让位。曲线取 `Motion.emphasized`（起步陡、收尾长），与所有
+            // 微交互同源；位移只有 1/28 与 1/40 屏宽 —— 大到能感觉到「换了一页」，小到
+            // 不会晃眼。
+            //
+            // ⚠️ 这一层里**只有非影厅页**：过渡期间不会再有两块 `PlayerPane` 抢同一个
+            // `controller.surface`，也不会有哪一页的画面被 Compose 的位移/透明度拖走。
+            if (!inCinema) {
+            AnimatedContent(
+                targetState = screen,
+                transitionSpec = {
+                    if (targetState == Screen.Cinema || initialState == Screen.Cinema) {
+                        EnterTransition.None togetherWith ExitTransition.None
+                    } else {
+                        val forward = targetState.ordinal >= initialState.ordinal
+                        val enter = fadeIn(Motion.curve(Motion.STANDARD)) +
+                            slideInHorizontally(Motion.curve(Motion.ENTRANCE)) { w ->
+                                if (forward) w / 28 else -w / 28
+                            }
+                        val leave = fadeOut(Motion.curve(Motion.MICRO, Motion.exit)) +
+                            slideOutHorizontally(Motion.curve(Motion.MICRO, Motion.exit)) { w ->
+                                if (forward) -w / 40 else w / 40
+                            }
+                        enter togetherWith leave
+                    }
+                },
+                label = "screen",
+            ) { targetScreen ->
+            when (targetScreen) {
+                Screen.Home -> HomeScreen(
+                    onGoCinema = { goTo(Screen.Cinema) },
+                    onOpenFile = { Shortcuts.onOpenFile() },
+                    onGoLibrary = { goTo(Screen.Library) },
+                )
+
+                Screen.Cinema -> Unit
+                // 影厅页不在这里渲染 —— 它是常驻层（见上面那段说明），
+                // 一旦被 `AnimatedContent` 摘掉，peer 与 vout 就跟着没了。
 
                 Screen.Library -> LibraryScreen(
                     catalog = catalog,
@@ -695,6 +816,7 @@ fun AppRoot(
                         roots = roots,
                     )
                 }
+            }
             }
             }
         }
