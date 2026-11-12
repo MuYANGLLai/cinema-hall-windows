@@ -21,7 +21,7 @@ const val DEFAULT_SIGNAL_ENDPOINT: String = "wss://101.133.234.226:8443/ws"
  * 打包参数，运行期拿不到（`jpackage.app-version` 只在安装器上下文里有）。
  * 发版时两处一起改；不一致的后果只是服务端设备列表里显示旧版本号。
  */
-const val DESKTOP_APP_VERSION: String = "0.1.29"
+const val DESKTOP_APP_VERSION: String = "0.1.30"
 
 /** 上报给服务端的平台标识（与 Android 的 `PLATFORM_ANDROID` 同一套命名）。 */
 const val DESKTOP_PLATFORM: String = "windows"

@@ -363,6 +363,10 @@ fun AppRoot(
             // 用户机器上仍然闪白，说明那一帧没画到。幕布把这件事变成确定的。
             PlayerCurtain.cover()
             hidePlayer = true
+            // 空态（没选片时那块「从影片库选片」）也是原生窗口，挪不走也不会跟着淡出。
+            // 只靠 `pageVisible` 得等一次重组，门禁逐帧实测那一帧与空态截图逐像素相同 ——
+            // 所以在这里当场收掉，与幕布同一条思路。
+            PlaybackOverlay.hideCoverNow()
             // 同一帧翻页：目标页的滑入由 `AnimatedContent` 负责（与互切完全同一条曲线）。
             // 中间不再插 60ms 的空白停顿 —— 那正是「这一侧没有动画」的手感来源。
             screen = next
@@ -762,6 +766,9 @@ fun AppRoot(
                         onSettingsChange(settings.copy(micInput = name))
                         cinema.module?.setAudioInput(name)
                     },
+                    // 空态覆盖层是另一扇原生窗口，挪不走（见 `PlayerPane.pageVisible`）：
+                    // 离开本页 / 幕布盖着的时候必须收起来，否则它会浮在影片库上面。
+                    pageVisible = inCinema && !hidePlayer,
                 )
             }
 

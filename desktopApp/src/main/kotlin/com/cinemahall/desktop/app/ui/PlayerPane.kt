@@ -97,17 +97,29 @@ fun PlayerPane(
     /**
      * 空态里那颗「从影片库选片」。null = 不画（例如本页没有影片库入口）。
      *
-     * 为什么空态必须由这里出（2026-11-12 UI 审查 F1）：影厅页没有选片时，画面区是
-     * 一整块纯黑（864×888，占窗口 55%），用户第一眼会当成播放器坏了。而空态只能用
-     * Compose 画，**Compose 内容又盖不住 AWT 重量级画布** —— 所以「没片」时把画布
-     * 整块挪出窗口（不是摘掉：peer 与 vout 都不能动，见类注释），空态才看得见。
+     * 为什么空态必须从这里出（2026-11-12 UI 审查 F1）：影厅页没有选片时，画面区是
+     * 一整块纯黑（864×888，占窗口 55%），用户第一眼会当成播放器坏了。而空态**只能**
+     * 由浮层窗口画 —— Compose 内容盖不住 AWT 重量级画布（见 `EmptyPlayerHint` 的说明）。
      */
     onPickFromLibrary: (() -> Unit)? = null,
+    /**
+     * 这一页现在是不是真的在窗口里看得到。
+     *
+     * ⚠️ 影厅页**常驻组合**（不摘掉是因为摘掉会毁掉 peer 与 vout），不在当前页时靠
+     * 整页位移挪到窗口外。浮层窗口是被挪不走的另一扇原生窗口，所以「空态覆盖层」
+     * 必须由这条参数管：离开本页就收起来，否则它会浮在影片库/设置页上面。
+     */
+    pageVisible: Boolean = true,
 ) {
     val colors = LocalCinemaColors.current
     // 位置换算要用（把 dp 偏移换成像素），见下面 onGloballyPositioned。
     val density = LocalDensity.current
     val target = controller.target
+    /**
+     * 「还没有选片」。空态不在这里画 —— 画面是 AWT 重量级组件，Compose 盖不住它，
+     * 所以由下面的浮层窗口（`PlaybackOverlay`）整块盖上去画（见 `EmptyPlayerHint`）。
+     */
+    val idle = movie == null
 
     if (target == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -224,23 +236,62 @@ fun PlayerPane(
             // 内容只装这一次：之后靠 `bar` 里的快照状态驱动浮层重组。每帧重装会把
             // 浮层里的局部状态（正在拖的进度、展开的菜单）一次次重置。
             com.cinemahall.desktop.app.Log.info("[overlay] 装配成功，装上内容")
-            overlay.setContent {
-                val themeColors = bar.themeColors
-                val themeScheme = bar.themeScheme
-                if (themeColors != null && themeScheme != null) {
-                    CinemaThemeOn(themeScheme, themeColors) {
-                        PlaybackBar(
-                            target = target,
-                            state = bar,
-                            modifier = overlay.sizeModifier,
-                            showTitle = false,
-                        )
+            overlay.setContent(
+                bar = {
+                    val themeColors = bar.themeColors
+                    val themeScheme = bar.themeScheme
+                    if (themeColors != null && themeScheme != null) {
+                        CinemaThemeOn(themeScheme, themeColors) {
+                            PlaybackBar(
+                                target = target,
+                                state = bar,
+                                modifier = overlay.sizeModifier,
+                                showTitle = false,
+                            )
+                        }
                     }
-                }
-            }
+                },
+                // 空态：整块画面。⚠️ 不能挂 `overlay.sizeModifier` —— 那条是控制条
+                // 「报出自己有多高、让窗口贴底边缩高」的通道，空态一报就是整个画面高，
+                // 之后控制条会以为自己有一整屏那么高。
+                cover = {
+                    val themeColors = bar.themeColors
+                    val themeScheme = bar.themeScheme
+                    if (themeColors != null && themeScheme != null) {
+                        CinemaThemeOn(themeScheme, themeColors) {
+                            EmptyPlayerHint(
+                                onPickFromLibrary = onPickFromLibrary,
+                                onOpenFile = onOpenFile,
+                            )
+                        }
+                    }
+                },
+            )
             overlay.startWatching()
             onDispose { overlay.dispose() }
         }
+    }
+
+    // ── 空态覆盖层什么时候盖上（F1）────────────────────────────────────────────
+    // 条件是「没片 + 本页真的看得见」。首帧 `SwingPanel` 还没挂进窗口（`isShowing` 为假），
+    // `showCover` 会拒绝 —— 所以每 120ms 再试一次，盖上就退出；期间 `idle` / `pageVisible`
+    // 一变，这个协程就被取消重开（不会留下一个还在重试的孤儿）。
+    LaunchedEffect(idle, pageVisible, overlayReady) {
+        if (overlay == null || !overlayReady) return@LaunchedEffect
+        if (!idle || !pageVisible) {
+            overlay.hideCover()
+            return@LaunchedEffect
+        }
+        var waited = 0
+        while (waited <= 4_000) {
+            if (overlay.showCover()) {
+                com.cinemahall.desktop.app.Log.info("[player] 空态覆盖层已盖上（等待 ${waited}ms）")
+                return@LaunchedEffect
+            }
+            delay(120)
+            waited += 120
+        }
+        com.cinemahall.desktop.app.Log.warn("[player] 空态覆盖层没能盖上（画面 4000ms 内未就绪）")
     }
 
     Column(modifier.fillMaxSize()) {
@@ -265,12 +316,11 @@ fun PlayerPane(
                     )
                 },
         ) {
-            // ── 没选片时把画布缩成 0×0，让空态（Compose 画的）能被看见 ────────────
-            // AWT 重量级组件永远盖在 Compose 之上（同「控制条只能用独立窗口」那条），
-            // 所以空态要显示，画布就必须让开。缩尺寸而不是挪位置，理由见下面那段警告。
-            // 画布本身不摘（peer 与 vout 都不动），选片之后 `awaitReady` 会等到它有
-            // 真实尺寸再装片 —— 这正是「零尺寸初始化导致按播放没反应」的既有防线。
-            val idle = movie == null
+            // ── 没选片时的空态交给**浮层窗口**画（见 `PlaybackOverlay.showCover`）──
+            // 画面是 AWT 重量级组件，Compose 画的东西盖不住它；而把画布缩成 0×0 会
+            // 当场打断视频输出（实测 `surface attach timed out` + 界面甩红字），
+            // 把画布挪出窗口则完全无效（AWT 子窗口无视祖先位移）。所以空态只能由
+            // 那扇 `JWindow` 整块盖上去 —— 下面的效果就是干这件事的。
             SwingPanel(
                 // ⚠️ `background` 必须显式给，默认是**白**（`Color.White`）。
                 // Compose 会在 `SwingPanel` 里再包一层 JPanel，它的底色就是这个值；
@@ -279,14 +329,11 @@ fun PlayerPane(
                 // （2026-11-08 用户报的就是这个）。给它画面底色，等于把这条缝填成黑的。
                 background = colors.videoBackdrop,
                 factory = { (surface as AwtPlaybackSurface).panel },
-                // ⚠️ 这里**不能**用 `offset` 把画布挪出窗口（2026-11-12 两轮实测）：
-                // `offset` 只要出现在本函数里（加在 `SwingPanel` 上、或加在它外面套的
-                // `Box` 上，都一样），AWT 子窗口就会**无视祖先的位移** —— 常驻层把整页
-                // 挪到 -4000dp，画布却仍停在 196,32 挡住别的页（AWT 树实测：
-                // 去掉了 offset 才回到 `bounds=-3804,32`）。缩尺寸没有这个副作用。
-                modifier = if (idle) Modifier.size(0.dp) else Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize(),
             )
-            if (idle) {
+            // 浮层起不来时（`broken`）才退回 Compose 版：那时候画布底下这块本来也
+            // 看不见，但至少空态还留在组合里，出问题能一眼看出是「浮层没起来」。
+            if (idle && !overlayReady) {
                 EmptyPlayerHint(
                     onPickFromLibrary = onPickFromLibrary,
                     onOpenFile = onOpenFile,
@@ -337,8 +384,11 @@ fun PlayerPane(
  * 唯一的提示在右侧栏，还是 12sp 的灰字「还没有选片」。首次进入会以为播放器坏了。
  *
  * 这里给的是「图标 + 一句话 + 两条出路」：从影片库挑（主），或直接开本地文件（次）。
- * 它只在 `movie == null` 时画，而且必须配合上面把画布挪出窗口 —— Compose 盖不住
- * AWT 重量级画布（这是 2026-11-07 就定下的既有结论）。
+ *
+ * ⚠️ 它**不是**叠在画布上画的：画面是 AWT 重量级组件，Compose 盖不住它。这个组合
+ * 实际被装进 `PlaybackOverlay` 的浮层窗口，靠那扇 `JWindow` 整块盖住画面
+ * （见 `PlayerPane` 里的 `overlay.setContent(cover = …)`）。所以这里的根容器
+ * 必须**铺满且不透明** —— 它盖住的是一块正在显示的原生画布。
  */
 @Composable
 private fun EmptyPlayerHint(
@@ -346,7 +396,13 @@ private fun EmptyPlayerHint(
     onOpenFile: () -> Unit,
 ) {
     val colors = LocalCinemaColors.current
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            // 不透明的底色：底下就是原生画布，任何透明处都会露出一块黑。
+            .background(colors.videoBackdrop),
+        contentAlignment = Alignment.Center,
+    ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
                 Modifier

@@ -52,9 +52,20 @@ class PlaybackOverlay(
     var broken by mutableStateOf(false)
         private set
 
+    /**
+     * 覆盖模式：这扇窗口正**整块盖住画面**画空态（见 [showCover]）。
+     *
+     * 覆盖期间「晃鼠标叫出控制条」「1.3 秒自动收回」两套逻辑都必须让位 —— 否则用户
+     * 晃一下鼠标，空态就被控制条顶掉、再被自动收回，画面变成一块纯黑：比没有空态更糟。
+     */
+    var covering by mutableStateOf(false)
+        private set
+
     private var window: JWindow? = null
     private val panel = ComposePanel()
     private var content: (@Composable () -> Unit)? = null
+    /** 覆盖模式要画的内容（空态）；null = 这扇浮层只做控制条。 */
+    private var coverContent: (@Composable () -> Unit)? = null
     private var disposed = false
 
     /** 内容自己量出来的高度（Compose 像素）。窗口高度 = 它 ÷ 缩放。 */
@@ -154,7 +165,16 @@ class PlaybackOverlay(
     private val ownerWatch = object : ComponentAdapter() {
         override fun componentMoved(e: ComponentEvent) = if (isVisible) syncBounds() else Unit
         override fun componentResized(e: ComponentEvent) = if (isVisible) syncBounds() else Unit
-        override fun componentHidden(e: ComponentEvent) = hideNow()
+        override fun componentHidden(e: ComponentEvent) {
+            // 覆盖模式跟着主窗口一起藏（空态绝不该留在桌面上），但**不退出**覆盖模式：
+            // 跟随定时器还在跑，主窗口一回来 `syncBounds` 就把空态放回去。
+            if (covering) hideTemporarily() else hideNow()
+        }
+    }
+
+    /** 只把窗口藏起来，不动模式、不停跟随（覆盖模式专用，见 [ownerWatch]）。 */
+    private fun hideTemporarily() {
+        runCatching { window?.isVisible = false }
     }
 
     /**
@@ -165,17 +185,30 @@ class PlaybackOverlay(
      */
     private val stateWatch = object : java.awt.event.WindowStateListener {
         override fun windowStateChanged(e: java.awt.event.WindowEvent) {
-            if (e.newState and java.awt.Frame.ICONIFIED != 0) hideNow()
+            if (e.newState and java.awt.Frame.ICONIFIED == 0) return
+            if (covering) hideTemporarily() else hideNow()
         }
     }
 
     private val isVisible: Boolean get() = window?.isVisible == true
 
-    /** 装内容。只调一次（见类注释第 3 段的说明）。 */
-    fun setContent(content: @Composable () -> Unit) {
-        this.content = content
+    /**
+     * 装内容。只调一次（见类注释第 3 段的说明）。
+     *
+     * [cover] 是「整块盖住画面」的内容（空态，见 [showCover]），null = 这扇浮层只做控制条。
+     * 两种内容**共用一扇窗口**：贴底边与铺满画面只是同一个 `JWindow` 的两种 bounds，
+     * 省掉第二扇窗口以及随之而来的第二套定位/跟随代码。
+     */
+    fun setContent(bar: @Composable () -> Unit, cover: (@Composable () -> Unit)? = null) {
+        coverContent = cover
+        // 组合时读 `covering`：切模式只要改这一条状态，内容自己换过去。
+        val composed: @Composable () -> Unit = {
+            val empty = coverContent
+            if (covering && empty != null) empty() else bar()
+        }
+        content = composed
         // 窗口已经建好了（用户先晃过鼠标）就立刻装上；否则等 `ensureWindow` 时装。
-        window?.let { runCatching { panel.setContent(content) } }
+        window?.let { runCatching { panel.setContent(composed) } }
     }
 
     /**
@@ -191,6 +224,9 @@ class PlaybackOverlay(
     /** 鼠标动一下就出来，并重新开始计时。 */
     fun poke(reason: String = "manual") {
         if (disposed || broken) return
+        // 空态覆盖期间没有可控制的东西（连片都没有）：既不该把控制条叠到空态上，
+        // 也不该让 `hideTimer` 起来把刚盖上的那一块收走（见 [covering]）。
+        if (covering) return
         val panelShowing = ownerUsable()
         if (!panelShowing) {
             hideNow()
@@ -213,11 +249,45 @@ class PlaybackOverlay(
     private var pokes = 0
 
     fun hide() {
+        // 空态覆盖着：这一次不收（只有 [hideCover] 能收，判据在调用方那边）。
+        if (covering) return
         // 正在拖动进度条 / 菜单还开着：这一次不收，下一轮再说。
         if (shouldStayVisible()) {
             hideTimer.restart()
             return
         }
+        hideNow()
+    }
+
+    /**
+     * 整块盖住画面（空态）。
+     *
+     * ── 为什么空态必须借这扇窗口（2026-11-12 实测）────────────────────────────
+     * 画面是 AWT 重量级 `Canvas`，Compose 画的任何东西都盖不住它（2026-11-07 定论）。
+     * 而「把画布缩成 0×0 让空态露出来」会当场打断视频输出（`surface attach timed out`，
+     * 界面左下角甩出红字），「把画布挪出窗口」则让 AWT 子窗口完全无视祖先的位移
+     * （实测画布仍停在 `196,32` 盖住别的页）。这扇 `JWindow` 天然在画布之上，
+     * 所以这块地方只能由它画。
+     *
+     * 返回 true = 这会儿真的盖上了。首帧时 `SwingPanel` 还没挂进窗口（`isShowing` 为假），
+     * 这里会拒绝 —— 调用方重试即可（见 `PlayerPane` 那条 120ms 的等待）。
+     */
+    fun showCover(): Boolean {
+        if (disposed || broken) return false
+        if (coverContent == null) return false
+        if (!ownerUsable()) return false
+        val w = ensureWindow() ?: return false
+        covering = true
+        syncBounds()
+        hideTimer.stop()
+        if (!trackTimer.isRunning) trackTimer.start()
+        return w.isVisible
+    }
+
+    /** 收起空态的覆盖层（选到片了 / 离开影厅页了）。 */
+    fun hideCover() {
+        if (!covering) return
+        covering = false
         hideNow()
     }
 
@@ -287,25 +357,33 @@ class PlaybackOverlay(
         if (isVisible) syncBounds()
     }
 
-    /** 贴在画面**底边**，宽度与画面一致。 */
+    /** 贴在画面**底边**，宽度与画面一致；覆盖模式下铺满整个画面矩形。 */
     private fun syncBounds() {
         val w = window ?: return
         if (disposed) return
         val showing = ownerUsable()
         if (!showing) {
-            hideNow()
+            // 覆盖模式：只是没人看得到我们，藏起来即可（定时器继续跑，回来自己显形）。
+            // 控制条：按老规矩把跟随一起停下。
+            if (covering) hideTemporarily() else hideNow()
             return
         }
-        val scale = runCatching {
-            (panel.graphicsConfiguration ?: video.panel.graphicsConfiguration).defaultTransform.scaleY
-        }.getOrNull()?.takeIf { it > 0.1 } ?: 1.0
-        // 内容高度是 Compose 像素（= AWT 逻辑像素 × 缩放），窗口要的是 AWT 逻辑像素。
-        val contentPx = if (contentHeightPx > 0) contentHeightPx.toDouble() else FALLBACK_HEIGHT_PX * scale
-        val heightAwt = (contentPx / scale).roundToInt()
         val rect = videoScreenRect() ?: return
-        if (heightAwt <= 0) return
-        val target = Rectangle(rect.x, rect.y + rect.height - heightAwt, rect.width, heightAwt)
+        val target = if (covering) {
+            rect
+        } else {
+            val scale = runCatching {
+                (panel.graphicsConfiguration ?: video.panel.graphicsConfiguration).defaultTransform.scaleY
+            }.getOrNull()?.takeIf { it > 0.1 } ?: 1.0
+            // 内容高度是 Compose 像素（= AWT 逻辑像素 × 缩放），窗口要的是 AWT 逻辑像素。
+            val contentPx = if (contentHeightPx > 0) contentHeightPx.toDouble() else FALLBACK_HEIGHT_PX * scale
+            val heightAwt = (contentPx / scale).roundToInt()
+            if (heightAwt <= 0) return
+            Rectangle(rect.x, rect.y + rect.height - heightAwt, rect.width, heightAwt)
+        }
+        // 先定尺寸再显形：反过来的话，恢复时那一帧会以旧位置画出来。
         if (w.bounds != target) w.bounds = target
+        if (covering && !w.isVisible) runCatching { w.isVisible = true }
     }
 
     companion object {
@@ -351,6 +429,19 @@ class PlaybackOverlay(
 
         /** 门禁：已经显示且内容量出了高度（说明 Compose 那一侧真的画出东西了）。 */
         fun activeSettled(): Boolean = active?.isSettled() == true
+
+        /**
+         * 立刻收起空态的覆盖层（切页时用）。
+         *
+         * 为什么需要这条静态入口：空态是**另一扇原生窗口**，`pageVisible` 变 false 之后
+         * 要等一次重组 + 一次效果启动才收得回去。门禁逐帧实测：只靠 `pageVisible`，
+         * 切到影片库的第一帧与空态截图**逐像素相同**（空态压在目标页上约 50ms）。
+         * 切页要它当场消失，就在切页这一个入口里直接收 —— 与幕布
+         * `PlayerCurtain.cover()` 同一条思路。
+         */
+        fun hideCoverNow() {
+            active?.hideCover()
+        }
     }
 
     init {

@@ -146,6 +146,13 @@ fun CinemaScreen(
     micInput: String? = null,
     /** 换麦克风输入源。传 null = 用系统默认。 */
     onSelectMicInput: (String?) -> Unit = {},
+    /**
+     * 本页此刻是不是真的在窗口里看得到。
+     *
+     * 影厅页是**常驻组合**（摘掉会毁掉视频输出），离开时靠整页位移挪到窗口外；
+     * 而空态的覆盖层是另一扇原生窗口、挪不走，所以必须显式告诉它什么时候该收起来。
+     */
+    pageVisible: Boolean = true,
 ) {
     val colors = LocalCinemaColors.current
 
@@ -164,6 +171,7 @@ fun CinemaScreen(
                 onPickMovie = onOpenFile,
                 movies = movies,
                 onSelectMovie = onSelectMovie,
+                pageVisible = pageVisible,
             ) {
                 ConnectSidePanel(
                     controller = controller,
@@ -212,6 +220,7 @@ fun CinemaScreen(
                 onPickMovie = onOpenFile,
                 movies = movies,
                 onSelectMovie = onSelectMovie,
+                pageVisible = pageVisible,
             ) {
                 LobbySidePanel(
                     module = module,
@@ -239,6 +248,7 @@ fun CinemaScreen(
                 onToggleFullscreen = onToggleFullscreen,
                 micInput = micInput,
                 onSelectMicInput = onSelectMicInput,
+                pageVisible = pageVisible,
             )
         }
     }
@@ -311,6 +321,8 @@ private fun StageLayout(
     onPickMovie: () -> Unit,
     movies: List<DesktopMovie>,
     onSelectMovie: (DesktopMovie) -> Unit,
+    /** 见 `CinemaScreen.pageVisible`。 */
+    pageVisible: Boolean = true,
     panel: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = LocalCinemaColors.current
@@ -333,6 +345,7 @@ private fun StageLayout(
                 modifier = Modifier.weight(1f),
                 fullscreen = fullscreen,
                 onToggleFullscreen = onToggleFullscreen,
+                pageVisible = pageVisible,
             )
         }
 
@@ -444,6 +457,8 @@ private fun HallPanel(
     micInput: String? = null,
     /** 换麦克风输入源。传 null = 用系统默认。 */
     onSelectMicInput: (String?) -> Unit = {},
+    /** 见 `CinemaScreen.pageVisible`（空态覆盖层要知道本页是不是看得见）。 */
+    pageVisible: Boolean = true,
 ) {
     val colors = LocalCinemaColors.current
     val callAudio by module.handler.callAudio.collectAsState()
@@ -580,6 +595,7 @@ private fun HallPanel(
                 } else {
                     null
                 },
+                pageVisible = pageVisible,
             )
         }
 
