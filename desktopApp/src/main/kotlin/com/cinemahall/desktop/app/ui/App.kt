@@ -124,7 +124,7 @@ private val NAV_ENTRIES = listOf(Screen.Home, Screen.Cinema, Screen.Library, Scr
  * 说明）。挪到窗口左侧之外，原生子窗口会被主窗口裁掉，既不显示也不影响布局。
  * 取值只要大到超出任何窗口宽度即可 —— `offset` 是布局位移，不影响这一页自己的测量。
  */
-private val HIDDEN_SCREEN_X = (-4000).dp
+private val HIDDEN_SCREEN_X = PlayerCurtain.HIDDEN_OFFSET_X_DP.dp
 
 /** 快捷键的落点（窗口级按键在 Main 里接，动作在这里拿）。 */
 object Shortcuts {
@@ -360,8 +360,30 @@ fun AppRoot(
                 PlayerCurtain.release()
             }
         } else {
-            // 回影厅时两件事同一帧做掉：否则会先看到「空的内容区」再看到画面。
-            if (next == Screen.Cinema) hidePlayer = false
+            // 回影厅：那块区域在「画面挂上来」之前是**没画过的** —— 主窗口是
+            // `NOREDIRECTIONBITMAP`，没画到的地方直接露桌面（门禁帧抓到播放器区域露着
+            // 桌面/别的窗口）。所以先盖一层幕布，等第一帧画出来再收。
+            if (next == Screen.Cinema) {
+                // 回影厅：那块矩形在「画面窗口挂上来」之前是**没画过的** —— 主窗口是
+                // NOREDIRECTIONBITMAP（见 `NativeFrame`），没画到的地方直接露桌面。
+                // 门禁逐帧抓到过：整块播放器区域露着桌面 + 后台窗口，一帧后自己变黑。
+                //
+                // 顺序：先落幕布（并等一帧让它真的落位）→ 再翻页。反过来的话幕布会
+                // 晚一帧到，那一帧照样露。
+                val covered = PlayerCurtain.coverForEntry()
+                scope.launch {
+                    if (covered) delay(24)
+                    hidePlayer = false
+                    screen = next
+                    if (covered) {
+                        // 画面窗口实测 50~200ms 才挂上；这段时间视频本来也没出画面。
+                        delay(60)
+                        PlayerCurtain.release()
+                    }
+                }
+                return
+            }
+            hidePlayer = false
             screen = next
         }
     }

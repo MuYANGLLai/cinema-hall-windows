@@ -21,6 +21,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.unit.dp
 import com.cinemahall.desktop.app.CinemaThemeOn
@@ -28,6 +31,7 @@ import com.cinemahall.desktop.app.LocalCinemaColors
 import com.cinemahall.desktop.app.PlayerController
 import com.cinemahall.desktop.library.DesktopMovie
 import com.cinemahall.desktop.media.AwtPlaybackSurface
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -85,6 +89,8 @@ fun PlayerPane(
     controlHint: String? = null,
 ) {
     val colors = LocalCinemaColors.current
+    // 位置换算要用（把 dp 偏移换成像素），见下面 onGloballyPositioned。
+    val density = LocalDensity.current
     val target = controller.target
 
     if (target == null) {
@@ -226,7 +232,22 @@ fun PlayerPane(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .background(colors.videoBackdrop),
+                .background(colors.videoBackdrop)
+                // 把「画面真正显示时在哪」告诉切页幕布：进影厅页那一瞬间画面窗口
+                // 还在新建，那块矩形是没画过的（窗口是 NOREDIRECTIONBITMAP → 露桌面）。
+                // 这里用 Compose 的位置 + 被挪走的距离反推，页面在窗口外也拿得到。
+                .onGloballyPositioned { coords ->
+                    val pos = coords.positionInWindow()
+                    val shift = with(density) {
+                        (-PlayerCurtain.HIDDEN_OFFSET_X_DP).dp.roundToPx()
+                    }
+                    PlayerCurtain.setDestination(
+                        x = pos.x.roundToInt() + shift,
+                        y = pos.y.roundToInt(),
+                        width = coords.size.width,
+                        height = coords.size.height,
+                    )
+                },
         ) {
             SwingPanel(
                 // ⚠️ `background` 必须显式给，默认是**白**（`Color.White`）。
