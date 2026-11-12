@@ -1,6 +1,7 @@
 package com.cinemahall.desktop.app.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -55,7 +56,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -242,6 +245,53 @@ fun CinemaScreen(
 }
 
 /**
+ * 右栏「大厅 / 房间」面板的收起开关。
+ *
+ * ── 为什么要有它（2026-11-12 UI 审查 F2）─────────────────────────────────────
+ * 默认窗口 1440×920 下，画面区是 `1440 - 196(侧栏) - 380(右栏) = 864` 宽、
+ * `920 - 32(标题栏) = 888` 高，接近正方形；16:9 的片子在里面只占 864×486，
+ * **上下各约 200px 黑边，占画面区 45%**（窗口拖到 1140 宽时升到 64%）。
+ * 这一栏一收起，画面就能用上整幅宽度（1244×888 → 片子 1244×700，面积差不多翻倍）。
+ *
+ * 做成一条 26dp 的窄轨道，而不是「把面板做成浮层」：这条轨道不在画面矩形之上
+ * （AWT 重量级画布会把它整块盖住 —— 控制条当年只能做成独立窗口就是这条限制）。
+ */
+@Composable
+private fun HallPanelToggle(collapsed: Boolean, onToggle: () -> Unit) {
+    val colors = LocalCinemaColors.current
+    val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val hover = hoverProgress(interaction)
+    Box(
+        Modifier
+            .fillMaxHeight()
+            .width(26.dp)
+            .hoverable(interaction)
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClickLabel = if (collapsed) "展开大厅面板" else "收起大厅面板",
+                onClick = onToggle,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        // 箭头自绘（不用字形：缺字体会变成方块，与 `AppIcon` 同一条取向）。
+        Canvas(Modifier.size(9.dp, 15.dp)) {
+            val stroke = 1.6.dp.toPx()
+            val c = if (hover > 0.02f) colors.accent else colors.ink3
+            if (collapsed) {
+                // 面板藏在右侧 → 箭头指右（点它把面板拉回来）
+                drawLine(c, Offset(0f, 0f), Offset(size.width, size.height / 2f), stroke, StrokeCap.Round)
+                drawLine(c, Offset(size.width, size.height / 2f), Offset(0f, size.height), stroke, StrokeCap.Round)
+            } else {
+                // 面板展开 → 箭头指左（点它把面板推走，画面吃满）
+                drawLine(c, Offset(size.width, 0f), Offset(0f, size.height / 2f), stroke, StrokeCap.Round)
+                drawLine(c, Offset(0f, size.height / 2f), Offset(size.width, size.height), stroke, StrokeCap.Round)
+            }
+        }
+    }
+}
+
+/**
  * 影厅页的「舞台」：左边画面（常驻），右边一列面板。
  *
  * 画面这一块**必须**由本函数持有、并且每次进入影厅页都走同一个调用点 ——
@@ -265,6 +315,8 @@ private fun StageLayout(
 ) {
     val colors = LocalCinemaColors.current
     var picking by remember { mutableStateOf(false) }
+    // 右栏可收起（UI 审查 F2）：收起后画面吃满整幅宽度，16:9 的黑边从 45% 降下来。
+    var panelCollapsed by remember { mutableStateOf(false) }
 
     Row(Modifier.fillMaxSize()) {
         Column(Modifier.weight(1f).fillMaxHeight()) {
@@ -277,6 +329,7 @@ private fun StageLayout(
                 autoplay = autoplay,
                 onVolumeChange = onVolumeChange,
                 onOpenFile = onOpenFile,
+                onPickFromLibrary = { picking = true },
                 modifier = Modifier.weight(1f),
                 fullscreen = fullscreen,
                 onToggleFullscreen = onToggleFullscreen,
@@ -284,6 +337,9 @@ private fun StageLayout(
         }
 
         if (!fullscreen) {
+            // 收起开关在面板**左侧**的窄轨道上：面板收起后它仍然在，不然就没入口再展开。
+            HallPanelToggle(collapsed = panelCollapsed, onToggle = { panelCollapsed = !panelCollapsed })
+            if (!panelCollapsed) {
             Column(
                 Modifier
                     .width(380.dp)
@@ -308,6 +364,7 @@ private fun StageLayout(
                 HorizontalDivider(color = colors.line)
                 Spacer(Modifier.height(10.dp))
                 panel()
+            }
             }
         }
     }
@@ -430,6 +487,8 @@ private fun HallPanel(
 
     // 影厅页选片：不离开本页、不自动起播（起播由用户按播放键决定）。
     var picking by remember { mutableStateOf(false) }
+    // 右栏可收起（UI 审查 F2）：与大厅页同一条口径，收起后画面吃满整幅宽度。
+    var panelCollapsed by remember { mutableStateOf(false) }
     // 同步读数：引擎还没建好时给一份默认快照（`canControl=true`，等价于「单机」）。
     val syncStatus by (syncEngine?.status ?: EMPTY_SYNC_STATUS).collectAsState()
     // 只在**有意义的变化**时留痕（角色 / 链路 / 是否锚定），不跟着 500ms 的漂移刷日志。
@@ -501,6 +560,7 @@ private fun HallPanel(
                 autoplay = autoplay,
                 onVolumeChange = onVolumeChange,
                 onOpenFile = onOpenFile,
+                onPickFromLibrary = { picking = true },
                 hooks = hooks,
                 modifier = Modifier.weight(1f),
                 // 控制权取自同步引擎的 `canControl`（契约 §7 的唯一真值：房主恒真、
@@ -532,6 +592,8 @@ private fun HallPanel(
         // 「重发片源」整颗删掉 —— 它是「片源摘要一直没到对端」时手动补一次的兜底，
         // 现在协调者在链路建起来、换片时都会自动重发，正常使用碰不到它。
         if (!fullscreen) {
+            HallPanelToggle(collapsed = panelCollapsed, onToggle = { panelCollapsed = !panelCollapsed })
+            if (!panelCollapsed) {
             Column(
                 Modifier
                     .width(360.dp)
@@ -707,6 +769,7 @@ private fun HallPanel(
 
                 Spacer(Modifier.height(6.dp))
                 TextButton(onClick = { module.leaveRoom() }) { Text("离开房间") }
+            }
             }
         }
 

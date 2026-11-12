@@ -8,11 +8,13 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
@@ -80,6 +82,7 @@ import com.cinemahall.desktop.app.LocalCinemaColors
 import com.cinemahall.desktop.app.PlayerController
 import com.cinemahall.desktop.app.account.AccountPhase
 import com.cinemahall.desktop.app.account.DesktopAccount
+import com.cinemahall.desktop.app.cinemaSliderColors
 import com.cinemahall.desktop.app.net.DesktopModule
 import com.cinemahall.desktop.library.DesktopMovie
 import com.cinemahall.desktop.library.DesktopMovieCatalog
@@ -690,7 +693,18 @@ fun AppRoot(
             }
             Spacer(Modifier.weight(1f))
             Text(if (AppPaths.packaged) "打包版" else "开发版", style = MaterialTheme.typography.labelSmall, color = colors.ink3)
-            Text(AppPaths.appRoot.absolutePath, style = MaterialTheme.typography.labelSmall, color = colors.ink3)
+            // ── 2026-11-12：侧栏不再铺整条绝对路径（UI 审查 F7）────────────────────
+            // 原来那行在 196dp 宽的侧栏里折成三行、把 `des`/`ktopApp` 从中间掰断，
+            // 末行还贴到窗口下沿（实测 y≈901/920），既是开发信息外露也挤压导航留白。
+            // 完整路径设置页「路径」卡片里已经有了；这里只留最后一级目录名 + 省略号，
+            // 悬停靠 tooltip 看全（`TooltipArea` 在 UI 里已有同样用法）。
+            Text(
+                AppPaths.appRoot.name,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.ink3,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
             }
         }
 
@@ -899,11 +913,18 @@ private fun HomeScreen(
     onGoLibrary: () -> Unit,
 ) {
     val colors = LocalCinemaColors.current
+    // ── 滚动条（UI 审查 F4）────────────────────────────────────────────────────
+    // `verticalScroll` 只负责能滚，不画任何指示器。1440×920 下首页内容只占上半屏，
+    // 没有条子时用户分不清「下面空了」还是「还有东西没看到」。
+    val scroll = rememberScrollState()
+    Box(Modifier.fillMaxSize()) {
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 28.dp, vertical = 24.dp),
+            .verticalScroll(scroll)
+            .padding(horizontal = 28.dp, vertical = 24.dp)
+            // 给滚动条让位，免得它压在卡片描边上。
+            .padding(end = 8.dp),
     ) {
         Text("首页", style = MaterialTheme.typography.headlineMedium, color = colors.ink)
         Spacer(Modifier.height(2.dp))
@@ -945,6 +966,11 @@ private fun HomeScreen(
                 )
             }
         }
+    }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scroll),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+        )
     }
 }
 
@@ -1058,11 +1084,16 @@ private fun SettingsScreen(
     diagnostics: @Composable ColumnScope.() -> Unit = {},
 ) {
     val colors = LocalCinemaColors.current
+    // 滚动条（UI 审查 F4）：这一页是最需要它的地方 —— 1440×920 下「诊断」卡片被窗口
+    // 下沿切掉，之前右侧没有任何指示器，用户根本看不出还能往下滚。
+    val scroll = rememberScrollState()
+    Box(Modifier.fillMaxSize()) {
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(20.dp),
+            .verticalScroll(scroll)
+            .padding(20.dp)
+            .padding(end = 8.dp),
     ) {
         Text("设置", style = MaterialTheme.typography.titleLarge, color = colors.ink)
         Spacer(Modifier.height(14.dp))
@@ -1091,6 +1122,8 @@ private fun SettingsScreen(
                     value = volume,
                     onValueChange = onVolume,
                     modifier = Modifier.weight(1f).padding(horizontal = 12.dp),
+                    // 不传 colors 会落到 M3 默认的紫灰未激活轨道（见 `cinemaSliderColors`）。
+                    colors = cinemaSliderColors(),
                 )
                 Text("${(volume * 100).toInt()}%", color = colors.ink2)
             }
@@ -1131,6 +1164,11 @@ private fun SettingsScreen(
             diagnostics()
         }
         Spacer(Modifier.height(16.dp))
+    }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scroll),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+        )
     }
 }
 

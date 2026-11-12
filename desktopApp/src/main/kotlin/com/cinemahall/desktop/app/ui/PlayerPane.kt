@@ -1,13 +1,19 @@
 package com.cinemahall.desktop.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -21,6 +27,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
@@ -87,6 +94,15 @@ fun PlayerPane(
     onManualSync: (() -> Unit)? = null,
     /** 控制权说明（成员端画在画面左上角，等价于安卓端那条灰条）。 */
     controlHint: String? = null,
+    /**
+     * 空态里那颗「从影片库选片」。null = 不画（例如本页没有影片库入口）。
+     *
+     * 为什么空态必须由这里出（2026-11-12 UI 审查 F1）：影厅页没有选片时，画面区是
+     * 一整块纯黑（864×888，占窗口 55%），用户第一眼会当成播放器坏了。而空态只能用
+     * Compose 画，**Compose 内容又盖不住 AWT 重量级画布** —— 所以「没片」时把画布
+     * 整块挪出窗口（不是摘掉：peer 与 vout 都不能动，见类注释），空态才看得见。
+     */
+    onPickFromLibrary: (() -> Unit)? = null,
 ) {
     val colors = LocalCinemaColors.current
     // 位置换算要用（把 dp 偏移换成像素），见下面 onGloballyPositioned。
@@ -249,6 +265,12 @@ fun PlayerPane(
                     )
                 },
         ) {
+            // ── 没选片时把画布缩成 0×0，让空态（Compose 画的）能被看见 ────────────
+            // AWT 重量级组件永远盖在 Compose 之上（同「控制条只能用独立窗口」那条），
+            // 所以空态要显示，画布就必须让开。缩尺寸而不是挪位置，理由见下面那段警告。
+            // 画布本身不摘（peer 与 vout 都不动），选片之后 `awaitReady` 会等到它有
+            // 真实尺寸再装片 —— 这正是「零尺寸初始化导致按播放没反应」的既有防线。
+            val idle = movie == null
             SwingPanel(
                 // ⚠️ `background` 必须显式给，默认是**白**（`Color.White`）。
                 // Compose 会在 `SwingPanel` 里再包一层 JPanel，它的底色就是这个值；
@@ -257,8 +279,19 @@ fun PlayerPane(
                 // （2026-11-08 用户报的就是这个）。给它画面底色，等于把这条缝填成黑的。
                 background = colors.videoBackdrop,
                 factory = { (surface as AwtPlaybackSurface).panel },
-                modifier = Modifier.fillMaxSize(),
+                // ⚠️ 这里**不能**用 `offset` 把画布挪出窗口（2026-11-12 两轮实测）：
+                // `offset` 只要出现在本函数里（加在 `SwingPanel` 上、或加在它外面套的
+                // `Box` 上，都一样），AWT 子窗口就会**无视祖先的位移** —— 常驻层把整页
+                // 挪到 -4000dp，画布却仍停在 196,32 挡住别的页（AWT 树实测：
+                // 去掉了 offset 才回到 `bounds=-3804,32`）。缩尺寸没有这个副作用。
+                modifier = if (idle) Modifier.size(0.dp) else Modifier.fillMaxSize(),
             )
+            if (idle) {
+                EmptyPlayerHint(
+                    onPickFromLibrary = onPickFromLibrary,
+                    onOpenFile = onOpenFile,
+                )
+            }
             if (controller.initError != null) {
                 Text(
                     controller.initError,
@@ -293,6 +326,52 @@ fun PlayerPane(
                 showTitle = movie != null && !fullscreen,
                 title = movie?.let { "${it.title} · ${it.path}" },
             )
+        }
+    }
+}
+
+/**
+ * 影厅页的「还没有选片」空态。
+ *
+ * 用户在 UI 审查里看到的是：一整块 864×888 的纯黑，占窗口 55%，没有任何字或按钮；
+ * 唯一的提示在右侧栏，还是 12sp 的灰字「还没有选片」。首次进入会以为播放器坏了。
+ *
+ * 这里给的是「图标 + 一句话 + 两条出路」：从影片库挑（主），或直接开本地文件（次）。
+ * 它只在 `movie == null` 时画，而且必须配合上面把画布挪出窗口 —— Compose 盖不住
+ * AWT 重量级画布（这是 2026-11-07 就定下的既有结论）。
+ */
+@Composable
+private fun EmptyPlayerHint(
+    onPickFromLibrary: (() -> Unit)?,
+    onOpenFile: () -> Unit,
+) {
+    val colors = LocalCinemaColors.current
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                Modifier
+                    .size(58.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(colors.accent.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                AppIconView(AppIcon.Cinema, 26.dp, colors.accent)
+            }
+            Spacer(Modifier.height(16.dp))
+            Text("还没有选片", style = MaterialTheme.typography.titleMedium, color = colors.ink)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "从影片库挑一部，或直接打开本地文件",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.ink3,
+            )
+            Spacer(Modifier.height(18.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (onPickFromLibrary != null) {
+                    Button(onClick = onPickFromLibrary) { Text("从影片库选片") }
+                }
+                OutlinedButton(onClick = onOpenFile) { Text("打开文件") }
+            }
         }
     }
 }

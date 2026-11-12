@@ -152,7 +152,11 @@ fun LibraryScreen(
                 }
             }
             Spacer(Modifier.width(6.dp))
-            Button(
+            // ── 2026-11-12：这一排只有一颗实心主按钮（UI 审查 F6）──────────────
+            // 原来「新建分类」与「扫描影片」都是实心 accent，并排两颗同级主操作，
+            // 用户要点两次才判断得出来该按哪颗。这一页的主操作是「扫描影片」——
+            // 内容靠它才进来；「新建分类」是整理动作，降成描边。
+            OutlinedButton(
                 onClick = {
                     newCategoryName = ""
                     newCategoryOpen = true

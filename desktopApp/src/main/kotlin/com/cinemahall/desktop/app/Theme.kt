@@ -1,7 +1,12 @@
 package com.cinemahall.desktop.app
 
+import androidx.compose.foundation.LocalScrollbarStyle
+import androidx.compose.foundation.ScrollbarStyle
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SliderColors
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -9,6 +14,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 
 /**
  * 桌面端色板 —— **逐字取自 Android 端** `feature/cinema/.../CinemaTheme.kt`。
@@ -46,7 +52,13 @@ private val NightColors = CinemaColors(
     surface2 = Color(0xFF191A1C),
     ink = Color(0xFFECEBE7),
     ink2 = Color(0xFFA5A29B),
-    ink3 = Color(0xFF6E6B65),
+    // ── 2026-11-12 提亮（UI 审查 F3）──────────────────────────────────────────
+    // 原值 `#6E6B65` 对卡片底 `#141416` 只有 **3.46:1**、对侧栏 `#191A1C` **3.28:1**，
+    // 而它承载的是真信息（路径、设备名、信令状态、说明文字），字号是 M3 默认的
+    // labelSmall/labelMedium（11–12sp，属「小文本」）—— AA 要求 4.5:1。
+    // 新值 `#8A8780`：卡片底 5.19:1 / 侧栏 4.90:1 / 页底 5.55:1，三处都过线且仍明显
+    // 弱于 `ink2`（7.22:1），层次没被压平。
+    ink3 = Color(0xFF8A8780),
     line = Color(0x11FFFFFF),
     line2 = Color(0x21FFFFFF),
     accent = Color(0xFFD3A24A),
@@ -112,14 +124,67 @@ private fun scheme(colors: CinemaColors, dark: Boolean): ColorScheme {
         surfaceContainerHighest = colors.surface2,
         surfaceContainerLow = colors.surface,
         surfaceContainerLowest = colors.surface,
+        // ── 2026-11-12：把剩下几个角色也钉住（UI 审查 F5）────────────────────
+        // `base.copy(...)` 只覆盖写出来的字段，没写的仍然是 M3 的深色默认值 —— 那些
+        // 默认值是**紫色调**的。实测证据：设置页音量滑条的未激活段取样 `#4A4458`，
+        // 正是 M3 默认的 `secondaryContainer`，而本主题里没有任何紫色。
+        // 症状不只是「配色不搭」：那段对卡片底只有 **1.98:1**，低于 WCAG 1.4.11 对
+        // UI 组件边界要求的 3:1，「音量还能加到多少」看不清。
+        // 所以这里把可能被组件读到的角色全部指向本主题的语义色，杜绝漏紫。
+        secondaryContainer = colors.surface2,
+        onSecondaryContainer = colors.ink2,
+        tertiaryContainer = colors.surface2,
+        onTertiaryContainer = colors.ink,
+        inversePrimary = colors.accent,
+        inverseSurface = colors.ink,
+        inverseOnSurface = colors.background,
+        surfaceTint = colors.accent,
+        scrim = Color(0xFF000000),
     )
 }
+
+/**
+ * 滑条的配色（全应用唯一一处）。
+ *
+ * ── 为什么必须显式给（UI 审查 F5）─────────────────────────────────────────────
+ * `Slider` 不传 `colors` 时读的是 `SliderDefaults.colors()`，其中未激活轨道取
+ * `secondaryContainer`。上面 `scheme()` 现在会把它钉到 `surface2`，但那样整条滑条
+ * 又会「看不出哪一段还没走」—— 所以轨道单独给一个可辨识的灰：
+ * `ink3` 的 72% 叠在卡片底上是 `#66 64 60` 一档，对 `#141416` 约 **3.2:1**
+ * （WCAG 1.4.11 对组件边界要求 ≥ 3:1），又明显弱于主色，不抢「已选量」。
+ */
+@Composable
+fun cinemaSliderColors(): SliderColors {
+    val colors = LocalCinemaColors.current
+    return SliderDefaults.colors(
+        thumbColor = colors.accent,
+        activeTrackColor = colors.accent,
+        inactiveTrackColor = colors.ink3.copy(alpha = 0.72f),
+    )
+}
+
+/**
+ * 滚动条样式：默认是 Material 的浅灰圆角条，在深色底上"像网页"。
+ * 这里改成主题灰（`ink3`），静止时半透明、悬浮变实，与其它微交互同一套手感。
+ */
+private fun scrollbarStyle(colors: CinemaColors) = ScrollbarStyle(
+    minimalHeight = 32.dp,
+    thickness = 8.dp,
+    shape = RoundedCornerShape(4.dp),
+    hoverDurationMillis = 160,
+    unhoverColor = colors.ink3.copy(alpha = 0.30f),
+    hoverColor = colors.ink3,
+)
 
 @Composable
 fun CinemaTheme(day: Boolean = false, content: @Composable () -> Unit) {
     val colors = if (day) DayColors else NightColors
     MaterialTheme(colorScheme = scheme(colors, dark = !day)) {
-        CompositionLocalProvider(LocalCinemaColors provides colors, content = content)
+        CompositionLocalProvider(
+            LocalCinemaColors provides colors,
+            LocalScrollbarStyle provides scrollbarStyle(colors),
+            content = content,
+        )
     }
 }
 
@@ -139,6 +204,10 @@ fun CinemaThemeOn(
     content: @Composable () -> Unit,
 ) {
     MaterialTheme(colorScheme = scheme) {
-        CompositionLocalProvider(LocalCinemaColors provides colors, content = content)
+        CompositionLocalProvider(
+            LocalCinemaColors provides colors,
+            LocalScrollbarStyle provides scrollbarStyle(colors),
+            content = content,
+        )
     }
 }
