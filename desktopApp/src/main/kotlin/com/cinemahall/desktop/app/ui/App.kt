@@ -3,7 +3,6 @@ package com.cinemahall.desktop.app.ui
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -331,36 +330,28 @@ fun AppRoot(
      */
     var hidePlayer by remember { mutableStateOf(false) }
 
-    /**
-     * 「刚换到非影厅页」时的淡入系数（0 → 1）。
-     *
-     * ── 为什么只有这一个方向（2026-11-12 用户问「为什么影厅切到别的页面没有动画」）──
-     * 目标页是普通 Compose 内容，套 `graphicsLayer(alpha = …)` 安全、效果也正是想要的。
-     * 反方向（切回影厅）**不能**这么做：那一页里是 `SwingPanel` 的重量级画面，
-     * Compose 的 interop 在带 alpha 的图层里会错位甚至不显示，而且 libVLC 的画面
-     * 本来也不跟 Compose 的透明度走。所以回影厅这一侧仍是硬切（外面有幕布兜着）。
-     *
-     * ── 为什么是 `Animatable` 而不是 `animateFloatAsState` ──────────────────────
-     * 这一侧要求目标页的**第一帧就是全透明**。`animateFloatAsState` 只接受目标值，
-     * 从 1 改到 0 本身要跑一段 220ms 动画：页面出现时读到的是「还没降下来的 1」，
-     * 先亮一帧再往下淡，等于白闪一下。`snapTo(0f)` 是同步生效的，跳掉这段。
-     */
-    val pageFade = remember { Animatable(1f) }
-
     val scope = rememberCoroutineScope()
 
     /**
      * 切页的唯一入口（「回影厅」也走它）。
      *
-     * ── 为什么离开影厅页必须分两步（2026-11-12 门禁实测）────────────────────────
-     * 影厅页的画面是 libVLC 画在一个**原生子窗口**里的，切页时必须把它挪出窗口
-     * （它不能被 Compose 的绘制盖住，也不能从组合里摘掉 —— 见常驻层那段说明）。
-     * 如果「挪走画面」与「换页」发生在同一帧，腾出来的那块区域是 Skia 还没画过的
-     * 缓冲：门禁逐帧抓图实测整帧 **57.9% 是纯 `#FFFFFF`**，只持续 1 帧。
+     * ── 两条方向的手感必须一样（2026-11-12 用户口径）────────────────────────────
+     * 「影厅 → 别的页」用的就是**页与页互切的那条过渡**，没有特例：目标页从哪一侧滑进来
+     * 由一个规则决定 —— 下一页在侧栏里位于上一页**下方**就从右边滑出，位于**上方**就从
+     * 左边滑出（实现见下面 `AnimatedContent` 的 `transitionSpec`，按 `Screen.ordinal` 比）。
      *
-     * 分两步之后，那一帧露出的是影厅页自己的深色底（画面区本来就有 `videoBackdrop`），
-     * 下一帧再换页就已经没有「腾空」这件事了。60ms ≈ 4 帧：肉眼察觉不到空白，
-     * 但足够 AWT 完整走一次绘制。
+     * 早先这一侧是硬切 + 手写淡入，理由是「影厅页里有 libVLC 的重量级画面，Compose
+     * 的位移/透明度拖不动它」。但真正需要动的是**目标页**；影厅页自己在这一步就被挪出
+     * 窗口了，所以这个理由不成立，只是当时没有拆开看。
+     *
+     * ── 为什么这里只需要挪画面 + 翻页（2026-11-12 门禁实测）────────────────────
+     * 画面是 libVLC 画在**原生子窗口**里的，它永远盖在 Compose 内容之上，也不能从组合里
+     * 摘掉（见常驻层那段说明）。所以要「先挪画面、同一帧翻页」：`inCinema` 变 false 后
+     * 常驻层自己就移出窗口了，目标页紧接着在同一帧开始滑入。
+     *
+     * 幕布（[PlayerCurtain]）仍然要先落：它盖住的是画面腾空到目标页画出第一帧之间那一段。
+     * 门禁逐帧实测：这一步之前整帧 **57.9% 是纯 `#FFFFFF`**（正好等于画面区面积），
+     * 落到幕布之后白像素 0%（既包括 60ms 分两步的老版本，也包括现在同帧切换的版本）。
      */
     fun goTo(next: Screen) {
         if (screen == Screen.Cinema && next != Screen.Cinema) {
@@ -369,27 +360,14 @@ fun AppRoot(
             // 用户机器上仍然闪白，说明那一帧没画到。幕布把这件事变成确定的。
             PlayerCurtain.cover()
             hidePlayer = true
+            // 同一帧翻页：目标页的滑入由 `AnimatedContent` 负责（与互切完全同一条曲线）。
+            // 中间不再插 60ms 的空白停顿 —— 那正是「这一侧没有动画」的手感来源。
+            screen = next
+            // 幕布只留到新页画出第一帧（≈2 帧）：新页第一帧已经把 `colors.background`
+            // 铺满那块矩形，早放不会露底；留太久它会变成一条挡住页面的深色竖带。
             scope.launch {
-                delay(60)
-                // 这 60ms 里用户又点回了影厅：那条分支已经把 `screen` 与 `hidePlayer`
-                // 复位，这条排好的切页就不该再落地 —— 否则导航高亮与内容会对不上。
-                if (screen != Screen.Cinema) return@launch
-                // 目标页还没进组合，先把系数压到 0：它出现的第一帧就是全透明的，
-                // 再淡到 1。若等它出现之后再置 0，会先亮一帧整页。
-                pageFade.snapTo(0f)
-                screen = next
-                // 幕布只留到新页画出第一帧（≈2 帧）。它早先是 90ms，因为换页是硬切、
-                // 只需要盖住「画面腾空」的那一帧；现在目标页从透明淡入，90ms 正好落在
-                // 淡入中段，幕布会变成一条挡住页面的深色竖带。而新页第一帧已经把
-                // `colors.background` 铺满那块矩形，早放不会露底（门禁白像素 0%）。
-                scope.launch {
-                    delay(24)
-                    PlayerCurtain.release()
-                }
-                // 隔一帧再起步：与换页同一帧启动，`AnimatedContent` 的首帧可能还没
-                // 提交，看起来会「跳」一下。
-                delay(16)
-                pageFade.animateTo(1f, Motion.curve(Motion.STANDARD))
+                delay(24)
+                PlayerCurtain.release()
             }
         } else {
             if (next == Screen.Cinema) {
@@ -401,9 +379,6 @@ fun AppRoot(
                 // 晚一帧到，那一帧照样露。
                 val covered = PlayerCurtain.coverForEntry()
                 scope.launch {
-                    // 回影厅不做淡入（见 `pageFade` 的说明）；把系数归位，免得影响
-                    // 下一次离开影厅（否则会从上次的中间值起跳）。
-                    pageFade.snapTo(1f)
                     if (covered) delay(24)
                     hidePlayer = false
                     screen = next
@@ -416,8 +391,6 @@ fun AppRoot(
                 }
                 return
             }
-            // 普通页之间互切：`pageFade` 不参与（这一侧本来就有带方向的淡入淡出）。
-            // 万一上一次离开影厅的淡入还没走完，它自己会收敛到 1，不必这里干预。
             hidePlayer = false
             screen = next
         }
@@ -778,24 +751,29 @@ fun AppRoot(
                 )
             }
 
-            // 其余页仍然走**带方向**的淡入淡出（2026-11-08 视觉升级）：新的往右侧偏一点点
+            // 页与页之间走**带方向**的淡入淡出（2026-11-08 视觉升级）：新的从一侧滑一点点
             // 浮上来、旧的快速让位。曲线取 `Motion.emphasized`（起步陡、收尾长），与所有
             // 微交互同源；位移只有 1/28 与 1/40 屏宽 —— 大到能感觉到「换了一页」，小到
             // 不会晃眼。
             //
-            // ⚠️ 这一层里**只有非影厅页**：过渡期间不会再有两块 `PlayerPane` 抢同一个
-            // `controller.surface`，也不会有哪一页的画面被 Compose 的位移/透明度拖走。
+            // 方向规则（2026-11-12 用户口径）：下一页在**侧栏里位于上一页下方** → 内容从
+            // 右边滑出；位于**上方** → 从左边滑出。侧栏顺序就是 `Screen.ordinal`，所以
+            // 判据只有一行 `targetState.ordinal >= initialState.ordinal`。
             //
-            // `pageFade` 只在这一层：它管的是「刚从影厅过来」那一次的整页淡入
-            // （见 `pageFade` 的说明）。挂在最外层容器上，页内所有绘制一起参与 ——
-            // 页面自己的 `AnimatedContent` 过渡仍照常，两层互不冲突。
-            if (!inCinema) {
+            // ⚠️ 这一层**永远在组合里**（不再用 `if (!inCinema)` 包着）。原因是动画：
+            // `AnimatedContent` 如果是「换页那一刻才第一次组合」，它没有上一个状态，
+            // 首帧直接落位、过渡根本不会播 —— 早先「影厅切走没有动画」就是这个成因，
+            // 当时的补丁是手写一层淡入，现在靠让它常驻来根治。
+            // 影厅页自己的内容在这里是 `Unit`（它挂在下面的常驻层上），所以常驻的代价是零：
+            // 过渡期间不会有两块 `PlayerPane` 抢同一个 `controller.surface`。
             AnimatedContent(
                 targetState = screen,
-                modifier = Modifier.graphicsLayer { alpha = pageFade.value },
                 transitionSpec = {
-                    if (targetState == Screen.Cinema || initialState == Screen.Cinema) {
-                        EnterTransition.None togetherWith ExitTransition.None
+                    // 进影厅不做过渡：那一页是常驻层，只是从窗口外挪回来；给它做淡入/位移
+                    // 反而会让「幕布 + 挪回来」这套确定的时序多出一段不确定的绘制。
+                    // 反过来（影厅 → 别的页）**照常播** —— 用户口径是两边手感一致。
+                    if (targetState == Screen.Cinema) {
+                        (EnterTransition.None togetherWith ExitTransition.None)
                     } else {
                         val forward = targetState.ordinal >= initialState.ordinal
                         val enter = fadeIn(Motion.curve(Motion.STANDARD)) +
@@ -808,6 +786,11 @@ fun AppRoot(
                             }
                         enter togetherWith leave
                     }
+                    // ⚠️ `using(null)` 不能省：出向内容是影厅页的 `Unit`（0×0），默认的
+                    // `SizeTransform` 会把容器从 0 长到整页 —— 那一路上滑进来的页面会被
+                    // 裁一刀，看起来像「页面从中间撑开」而不是「从右侧滑入」。
+                    // 关掉它之后容器尺寸直接取目标页的，位移才是整块位移。
+                    .using(null)
                 },
                 label = "screen",
             ) { targetScreen ->
@@ -885,7 +868,6 @@ fun AppRoot(
                         roots = roots,
                     )
                 }
-            }
             }
             }
         }
