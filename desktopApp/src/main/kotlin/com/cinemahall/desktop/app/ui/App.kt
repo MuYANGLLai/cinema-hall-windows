@@ -3,6 +3,7 @@ package com.cinemahall.desktop.app.ui
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -330,6 +331,22 @@ fun AppRoot(
      */
     var hidePlayer by remember { mutableStateOf(false) }
 
+    /**
+     * 「刚换到非影厅页」时的淡入系数（0 → 1）。
+     *
+     * ── 为什么只有这一个方向（2026-11-12 用户问「为什么影厅切到别的页面没有动画」）──
+     * 目标页是普通 Compose 内容，套 `graphicsLayer(alpha = …)` 安全、效果也正是想要的。
+     * 反方向（切回影厅）**不能**这么做：那一页里是 `SwingPanel` 的重量级画面，
+     * Compose 的 interop 在带 alpha 的图层里会错位甚至不显示，而且 libVLC 的画面
+     * 本来也不跟 Compose 的透明度走。所以回影厅这一侧仍是硬切（外面有幕布兜着）。
+     *
+     * ── 为什么是 `Animatable` 而不是 `animateFloatAsState` ──────────────────────
+     * 这一侧要求目标页的**第一帧就是全透明**。`animateFloatAsState` 只接受目标值，
+     * 从 1 改到 0 本身要跑一段 220ms 动画：页面出现时读到的是「还没降下来的 1」，
+     * 先亮一帧再往下淡，等于白闪一下。`snapTo(0f)` 是同步生效的，跳掉这段。
+     */
+    val pageFade = remember { Animatable(1f) }
+
     val scope = rememberCoroutineScope()
 
     /**
@@ -354,15 +371,27 @@ fun AppRoot(
             hidePlayer = true
             scope.launch {
                 delay(60)
+                // 这 60ms 里用户又点回了影厅：那条分支已经把 `screen` 与 `hidePlayer`
+                // 复位，这条排好的切页就不该再落地 —— 否则导航高亮与内容会对不上。
+                if (screen != Screen.Cinema) return@launch
+                // 目标页还没进组合，先把系数压到 0：它出现的第一帧就是全透明的，
+                // 再淡到 1。若等它出现之后再置 0，会先亮一帧整页。
+                pageFade.snapTo(0f)
                 screen = next
-                // 新页画出来之后再把幕布挪走。90ms ≈ 5 帧，看不出这层深色。
-                delay(90)
-                PlayerCurtain.release()
+                // 幕布只留到新页画出第一帧（≈2 帧）。它早先是 90ms，因为换页是硬切、
+                // 只需要盖住「画面腾空」的那一帧；现在目标页从透明淡入，90ms 正好落在
+                // 淡入中段，幕布会变成一条挡住页面的深色竖带。而新页第一帧已经把
+                // `colors.background` 铺满那块矩形，早放不会露底（门禁白像素 0%）。
+                scope.launch {
+                    delay(24)
+                    PlayerCurtain.release()
+                }
+                // 隔一帧再起步：与换页同一帧启动，`AnimatedContent` 的首帧可能还没
+                // 提交，看起来会「跳」一下。
+                delay(16)
+                pageFade.animateTo(1f, Motion.curve(Motion.STANDARD))
             }
         } else {
-            // 回影厅：那块区域在「画面挂上来」之前是**没画过的** —— 主窗口是
-            // `NOREDIRECTIONBITMAP`，没画到的地方直接露桌面（门禁帧抓到播放器区域露着
-            // 桌面/别的窗口）。所以先盖一层幕布，等第一帧画出来再收。
             if (next == Screen.Cinema) {
                 // 回影厅：那块矩形在「画面窗口挂上来」之前是**没画过的** —— 主窗口是
                 // NOREDIRECTIONBITMAP（见 `NativeFrame`），没画到的地方直接露桌面。
@@ -372,17 +401,23 @@ fun AppRoot(
                 // 晚一帧到，那一帧照样露。
                 val covered = PlayerCurtain.coverForEntry()
                 scope.launch {
+                    // 回影厅不做淡入（见 `pageFade` 的说明）；把系数归位，免得影响
+                    // 下一次离开影厅（否则会从上次的中间值起跳）。
+                    pageFade.snapTo(1f)
                     if (covered) delay(24)
                     hidePlayer = false
                     screen = next
-                    if (covered) {
-                        // 画面窗口实测 50~200ms 才挂上；这段时间视频本来也没出画面。
-                        delay(60)
-                        PlayerCurtain.release()
-                    }
+                    // 画面窗口实测 50~200ms 才挂上；这段时间视频本来也没出画面。
+                    // `covered == false` 时也等这一下再收：幕布可能还停在**上一轮**
+                    // 的画面矩形上（用户 60ms 内又点回影厅，离开那条协程已经作废），
+                    // 立刻收就等于在画面窗口挂上之前把那块空矩形露出来。
+                    delay(60)
+                    PlayerCurtain.release()
                 }
                 return
             }
+            // 普通页之间互切：`pageFade` 不参与（这一侧本来就有带方向的淡入淡出）。
+            // 万一上一次离开影厅的淡入还没走完，它自己会收敛到 1，不必这里干预。
             hidePlayer = false
             screen = next
         }
@@ -750,9 +785,14 @@ fun AppRoot(
             //
             // ⚠️ 这一层里**只有非影厅页**：过渡期间不会再有两块 `PlayerPane` 抢同一个
             // `controller.surface`，也不会有哪一页的画面被 Compose 的位移/透明度拖走。
+            //
+            // `pageFade` 只在这一层：它管的是「刚从影厅过来」那一次的整页淡入
+            // （见 `pageFade` 的说明）。挂在最外层容器上，页内所有绘制一起参与 ——
+            // 页面自己的 `AnimatedContent` 过渡仍照常，两层互不冲突。
             if (!inCinema) {
             AnimatedContent(
                 targetState = screen,
+                modifier = Modifier.graphicsLayer { alpha = pageFade.value },
                 transitionSpec = {
                     if (targetState == Screen.Cinema || initialState == Screen.Cinema) {
                         EnterTransition.None togetherWith ExitTransition.None
