@@ -1,10 +1,12 @@
 package com.cinemahall.desktop.app
 
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -15,6 +17,7 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPlacement
+import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.cinemahall.desktop.app.account.DesktopAccount
@@ -34,6 +37,8 @@ import java.awt.Robot
 import java.awt.event.KeyEvent
 import java.io.File
 import javax.imageio.ImageIO
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * 桌面端入口（W3 + W5）。
@@ -204,6 +209,9 @@ fun main(args: Array<String>) {
     fun cleanup() {
         if (cleanedUp) return
         cleanedUp = true
+        // 窗口矩形要在窗口还活着的时候读（顺序很关键：放到 `exitApplication` 之后
+        // 可能已经读不到了）。防抖可能还没落盘，这里无条件补一次。
+        WindowBoundsMemory.flushNow()
         KeepAwake.disable()
         // 托盘图标要在**窗口之前**卸：它自己是一个「还有图形资源要看管」的理由，
         // 留着它，AWT 的自动收尾不会发生（见 `TraySupport.installed` 的注释）。
@@ -282,8 +290,34 @@ fun main(args: Array<String>) {
         var settings by remember { mutableStateOf(settingsStore.load()) }
         if (settings.keepAwake) KeepAwake.enable()
 
+        // ── 恢复上次关闭时的窗口矩形（2026-11-12 用户口径）──────────────────────
+        // 存在 `data/window.json`（像素）。`null` = 没存过，或存下来的那块已经不在
+        // 任何屏幕里（拔了外接屏 / 改了分辨率）—— 那就交给系统摆，别硬挪回屏幕外。
+        val boundsFile = remember { WindowBoundsFile(AppPaths.windowFile) }
+        val savedWindow = remember { sanitizeWindowBounds(boundsFile.load()) }
+        val startScale = remember { primaryScreenScale() }
+        val startSize = remember(savedWindow, startScale) {
+            DpSize(
+                ((savedWindow?.width ?: DEFAULT_WINDOW_WIDTH) / startScale)
+                    .roundToInt().coerceAtLeast(640).dp,
+                ((savedWindow?.height ?: DEFAULT_WINDOW_HEIGHT) / startScale)
+                    .roundToInt().coerceAtLeast(420).dp,
+            )
+        }
+        val startPosition = remember(savedWindow, startScale) {
+            if (savedWindow == null) {
+                WindowPosition(Alignment.Center)
+            } else {
+                WindowPosition(
+                    (savedWindow.x / startScale).roundToInt().dp,
+                    (savedWindow.y / startScale).roundToInt().dp,
+                )
+            }
+        }
+
         val windowState = rememberWindowState(
-            size = DpSize(settings.windowWidth.dp, settings.windowHeight.dp),
+            size = startSize,
+            position = startPosition,
             // placement **固定 Floating**：窗口从一开始就是无边框的，全屏只由下面的
             // `LaunchedEffect(fullscreen)` 改 bounds 实现。用 `WindowPlacement.Fullscreen`
             // 会去切窗口样式，正是「退出全屏黑一下」的来源。
@@ -405,6 +439,46 @@ fun main(args: Array<String>) {
             var savedBounds by remember { mutableStateOf<java.awt.Rectangle?>(null) }
             // 启动那次全屏与之后的切换走同一条即时路径（见下面 `LaunchedEffect(fullscreen)`）。
 
+            // ── 位置校正（只在换算有误差时动）────────────────────────────────────
+            // `memoryWindowState` 吃 dp、我们存的是 px，换算用的是**主屏**缩放。
+            // 窗口如果落在另一块缩放在不同的显示器上，会差几十像素 —— 那时补一次
+            // `setLocation`（AWT 吃像素）。100% 单屏下这一步什么都不做（不会看到跳动）。
+            LaunchedEffect(composeWindow) {
+                val want = savedWindow ?: return@LaunchedEffect
+                if (fullscreen || options.startFullscreen) return@LaunchedEffect
+                delay(80)
+                val now = composeWindow.location
+                if (abs(now.x - want.x) > 2 || abs(now.y - want.y) > 2) {
+                    Log.info("[ui] 窗口位置校正 $now → ${want.x},${want.y}")
+                    composeWindow.setLocation(want.x, want.y)
+                }
+            }
+
+            // ── 记住窗口位置与大小（2026-11-12 用户口径）──────────────────────
+            // 拖动/缩放 600ms 防抖写盘；全屏与最大化期间的矩形不写（见 `WindowBounds`）。
+            DisposableEffect(composeWindow) {
+                val recorder = WindowBoundsRecorder(
+                    window = composeWindow,
+                    isFullscreen = { fullscreen },
+                    isZoomed = {
+                        runCatching {
+                            com.cinemahall.desktop.app.ui.NativeFrame.isZoomed(composeWindow)
+                        }.getOrDefault(false)
+                    },
+                    persist = { rect ->
+                        boundsFile.save(rect)
+                        Log.info("[ui] 记住窗口矩形 ${rect.width}x${rect.height} @${rect.x},${rect.y}")
+                    },
+                )
+                recorder.start()
+                // 退出路径（六条）最后都落在 `cleanup()` 上，而它拿不到组合里的东西。
+                WindowBoundsMemory.install { recorder.flush() }
+                onDispose {
+                    WindowBoundsMemory.clear()
+                    recorder.dispose()
+                }
+            }
+
             // 窗口底色 = 主题背景色（缩放时露出来的边就是它，不再是系统白）。
             // 换日间/夜间主题时重设一次。
             //
@@ -521,6 +595,11 @@ fun main(args: Array<String>) {
             }
 
             CinemaTheme(day = settings.theme == "day") {
+                // 主窗口下发给弹窗：`AppDialogWindow` 要在**创建之前**算出「居中于本
+                // 窗口」的坐标，否则会先在屏幕中心闪一下再跳过来（2026-11-12 用户报的）。
+                androidx.compose.runtime.CompositionLocalProvider(
+                    com.cinemahall.desktop.app.ui.LocalOwnerWindow provides composeWindow,
+                ) {
                 AppRoot(
                     controller = controller,
                     catalog = catalog,
@@ -553,6 +632,7 @@ fun main(args: Array<String>) {
                     chrome = chrome,
                     gateScreen = gateScreen,
                 )
+                }
             }
 
             // 门禁：切页闪白 / 黑屏（`--screen-blink=<ms>`）。

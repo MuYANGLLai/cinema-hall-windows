@@ -95,7 +95,7 @@ fun PlayerPane(
     /** 控制权说明（成员端画在画面左上角，等价于安卓端那条灰条）。 */
     controlHint: String? = null,
     /**
-     * 空态里那颗「从影片库选片」。null = 不画（例如本页没有影片库入口）。
+     * 空态里那颗「片库」。null = 不画（例如本页没有影片库入口）。
      *
      * 为什么空态必须从这里出（2026-11-12 UI 审查 F1）：影厅页没有选片时，画面区是
      * 一整块纯黑（864×888，占窗口 55%），用户第一眼会当成播放器坏了。而空态**只能**
@@ -415,16 +415,10 @@ private fun EmptyPlayerHint(
             }
             Spacer(Modifier.height(16.dp))
             Text("还没有选片", style = MaterialTheme.typography.titleMedium, color = colors.ink)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "从影片库挑一部，或直接打开本地文件",
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.ink3,
-            )
             Spacer(Modifier.height(18.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (onPickFromLibrary != null) {
-                    Button(onClick = onPickFromLibrary) { Text("从影片库选片") }
+                    Button(onClick = onPickFromLibrary) { Text("片库") }
                 }
                 OutlinedButton(onClick = onOpenFile) { Text("打开文件") }
             }

@@ -13,14 +13,29 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import androidx.compose.ui.window.DialogWindow
+import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.rememberDialogState
 import com.cinemahall.desktop.app.LocalCinemaColors
+import com.cinemahall.desktop.app.Log
+import androidx.compose.ui.Alignment
+import kotlin.math.abs
+import kotlin.math.roundToInt
+
+/**
+ * 应用**主窗口**。由 `Main.kt` 在 `Window { … }` 里下发（`CompositionLocalProvider`）。
+ *
+ * 只有一处用途：弹窗要在**窗口创建之前**就知道自己该摆在哪儿。
+ * `DialogWindow` 的默认位置是「屏幕居中」，创建完再 `setLocation` = 先闪一下再跳过去
+ * —— 2026-11-12 用户报的「点片库先弹在屏幕中心，再闪现到软件窗口中心」就是它。
+ */
+val LocalOwnerWindow = staticCompositionLocalOf<java.awt.Window?> { null }
 
 /**
  * 应用里**所有**独立窗口弹层都走这里（2026-11-07 用户口径：弹窗一律无边框）。
@@ -59,9 +74,41 @@ fun AppDialogWindow(
     resizable: Boolean = true,
     content: @Composable () -> Unit,
 ) {
+    // ── 位置在**创建之前**算好 ────────────────────────────────────────────────
+    // `WindowPosition.Absolute` 的单位是 **dp**（`WindowPosition(x.dp, y.dp)`），
+    // 而我们要对齐的是主窗口的**像素** bounds，所以要显式换一次。
+    val ownerWindow = LocalOwnerWindow.current
+    val scale: Float = remember(ownerWindow) {
+        // ⚠️ `defaultTransform.scaleX` 是 **Double**（`AffineTransform.getScaleX()`），
+        // 与 Float 字面量混着写会被推成 `Number & Comparable<…>`，所以要显式转。
+        val s = runCatching {
+            ownerWindow!!.graphicsConfiguration.defaultTransform.scaleX
+        }.getOrNull() ?: 1.0
+        if (s <= 0.1) 1.0f else s.toFloat()
+    }
+    val centeredPx = remember(ownerWindow, size, scale) {
+        ownerWindow?.let { centeredInOwner(it, size, scale) }
+    }
+    val initialPosition = remember(centeredPx, scale) {
+        if (centeredPx == null) {
+            WindowPosition(Alignment.Center)
+        } else {
+            val x = (centeredPx.x.toFloat() / scale).roundToInt()
+            val y = (centeredPx.y.toFloat() / scale).roundToInt()
+            WindowPosition(x.dp, y.dp)
+        }
+    }
+    // 一行留痕：位置算不出来时（owner 还没挂上、多显示器缩放异常）能一眼看出来。
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        Log.info(
+            "[dialog] $title 居中 owner=${ownerWindow?.let { "${it.javaClass.simpleName} ${it.bounds}" }} " +
+                "scale=$scale center=${centeredPx?.let { "${it.x},${it.y}" }}",
+        )
+    }
+
     DialogWindow(
         onCloseRequest = onClose,
-        state = rememberDialogState(size = size),
+        state = rememberDialogState(size = size, position = initialPosition),
         title = title,
         undecorated = true,
         resizable = resizable,
@@ -108,17 +155,19 @@ fun AppDialogWindow(
         // 弹窗关掉时必须把 WndProc 换回去：回调比窗口活得久会让进程直接崩。
         DisposableEffect(window) { onDispose { chrome.disposeNative() } }
 
-        // ── 摆到主窗口正中 ────────────────────────────────────────────────────
-        // Compose 的默认位置是「屏幕居中」，而主窗口只占屏幕的一块 —— 结果弹窗
-        // 一半压在窗口外面，用户会以为点错了。这里按**主窗口**居中摆一次。
+        // ── 复核一次位置 ──────────────────────────────────────────────────────
+        // 上面已经把位置算在**窗口创建之前**了，正常情况下这里什么都不做（对比一下就走）。
+        // 留着它的原因：`WindowPosition` 吃 dp、我们给的是 px÷缩放，两者在
+        // 「主窗口与目标屏幕不是同一个缩放」的多显示器场景下会差几像素 —— 那时补一次
+        // 精确的 `setLocation`（AWT 用的是像素），用户看不到跳动。
         LaunchedEffect(window) {
+            val want = centeredPx ?: return@LaunchedEffect
             delay(60) // 等窗口按 DpSize 定好尺寸
-            val owner = (window as? java.awt.Dialog)?.owner ?: return@LaunchedEffect
-            val ob = owner.bounds
-            val w = window.width
-            val h = window.height
-            if (w <= 0 || h <= 0) return@LaunchedEffect
-            window.setLocation(ob.x + (ob.width - w) / 2, ob.y + (ob.height - h) / 2)
+            val now = window.location
+            if (abs(now.x - want.x) > 2 || abs(now.y - want.y) > 2) {
+                Log.info("[dialog] 位置微调 $now → $want")
+                window.setLocation(want.x, want.y)
+            }
         }
 
         Box(Modifier.fillMaxSize().background(colors.background)) {
@@ -152,4 +201,20 @@ fun AppDialogWindow(
             if (resizable) ResizeHandles(chrome, enabled = true)
         }
     }
+}
+
+/**
+ * 弹窗居中于主窗口时的**像素**坐标（null = 主窗口还没有尺寸）。
+ *
+ * 用 `owner.bounds`（屏幕像素）+ `DpSize × 缩放` 直接算，不走 Compose 的
+ * `boundsInWindow`：后者是 Compose 像素，与 `Window.setLocation` 吃的 AWT 逻辑像素
+ * 不是一回事（这条在 `PlaybackOverlay` 里踩过一次）。
+ */
+private fun centeredInOwner(owner: java.awt.Window, size: DpSize, scale: Float): java.awt.Point? {
+    val ob = runCatching { owner.bounds }.getOrNull() ?: return null
+    if (ob.width <= 0 || ob.height <= 0) return null
+    val wPx = (size.width.value * scale).roundToInt()
+    val hPx = (size.height.value * scale).roundToInt()
+    if (wPx <= 0 || hPx <= 0) return null
+    return java.awt.Point(ob.x + (ob.width - wPx) / 2, ob.y + (ob.height - hPx) / 2)
 }

@@ -1,5 +1,9 @@
 package com.cinemahall.desktop.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -19,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -67,6 +72,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.cinemahall.core.media.MediaCheck
 import com.cinemahall.core.media.MismatchReason
 import com.cinemahall.core.model.Member
@@ -621,6 +627,16 @@ private fun HallPanel(
                     .padding(horizontal = 14.dp, vertical = 12.dp),
             ) {
                 // 房间号：位置不变，复制做成右侧小图标。
+                //
+                // 复制反馈（2026-11-12 用户口径）：按下时**图标高亮**，右侧浮出一颗
+                // 「复制成功！」小气泡，1.4 秒后自己消失。气泡不占布局（叠在那一行上，
+                // 带 `zIndex` 免得被后面的信号状态字压住），也不改这一行的高度。
+                var copied by remember { mutableStateOf(false) }
+                LaunchedEffect(copied) {
+                    if (!copied) return@LaunchedEffect
+                    delay(1_400)
+                    copied = false
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("房间号", style = MaterialTheme.typography.labelMedium, color = colors.ink3)
                     Spacer(Modifier.width(8.dp))
@@ -633,13 +649,33 @@ private fun HallPanel(
                     )
                     Spacer(Modifier.width(6.dp))
                     // 「复制房间号」是一颗自绘的小图标（原来是 ⧉ 字形，缺字体会变方块）。
-                    Box(
-                        Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .clickable(onClickLabel = "复制房间号") { copyToClipboard(room.roomId) }
-                            .padding(horizontal = 6.dp, vertical = 4.dp),
-                    ) {
-                        AppIconView(AppIcon.Copy, 15.dp, colors.ink3)
+                    Box {
+                        Box(
+                            Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(
+                                    if (copied) colors.accent.copy(alpha = 0.18f) else Color.Transparent,
+                                )
+                                .clickable(onClickLabel = "复制房间号") {
+                                    copyToClipboard(room.roomId)
+                                    copied = true
+                                }
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                        ) {
+                            AppIconView(
+                                AppIcon.Copy,
+                                15.dp,
+                                if (copied) colors.accent else colors.ink3,
+                            )
+                        }
+                        // 悬浮小提示：挂在图标右边，不占位、不参与布局。
+                        CopyToast(
+                            visible = copied,
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .offset(x = 30.dp)
+                                .zIndex(1f),
+                        )
                     }
                     Spacer(Modifier.weight(1f))
                     Text(
@@ -674,14 +710,8 @@ private fun HallPanel(
                             onSetAllowed = { module.handler.setMemberAllowed(member.userId, it) },
                         )
                     }
-                    if (room.members.size < 2) {
-                        Text(
-                            "还差一个人。把房间号念给对方，让他在另一台机器上点「加入」。",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = colors.ink3,
-                            modifier = Modifier.padding(top = 6.dp),
-                        )
-                    }
+                    // 2026-11-12 用户口径：「还差一个人。把房间号念给对方……」这行灰字删掉
+                    // —— 房间号就在卡片上方，多一句话只是噪音。
                 }
 
                 Spacer(Modifier.height(10.dp))
@@ -691,41 +721,44 @@ private fun HallPanel(
                 // 改成卡片内的一列之后，宽度天然被侧栏约束，长设备名也不会溢出。
                 var micOpen by remember { mutableStateOf(false) }
                 var micDevices by remember { mutableStateOf<List<AudioInputDevice>>(emptyList()) }
-                HallCard(
-                    title = "通话",
-                    // 与安卓简洁模式一致：开关就在标题右边，不占额外一行。
-                    // 2026-11-12 用户口径：开关**左边**加一颗「麦克风」，点开下拉选输入源。
-                    trailing = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            MicButton(
-                                open = micOpen,
-                                onClick = {
-                                    // 每次展开都重新枚举：插拔 USB 麦之后不用重启程序。
-                                    if (!micOpen) {
-                                        micDevices = runCatching { AudioInputs.list() }
-                                            .getOrDefault(emptyList())
-                                    }
-                                    micOpen = !micOpen
-                                },
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            OutlinedButton(
-                                onClick = { module.handler.setCallEnabled(!callAudio.requested, "影厅面板") },
-                            ) {
-                                Text(if (callAudio.requested) "关闭通话" else "开启通话")
-                            }
+                HallCard(title = "通话") {
+                    // 2026-11-12 用户口径：两颗按钮从标题右侧挪到标题**下方**，靠左，
+                    // 顺序是「开启通话」在前、「麦克风」在后。
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = { module.handler.setCallEnabled(!callAudio.requested, "影厅面板") },
+                        ) {
+                            Text(if (callAudio.requested) "关闭通话" else "开启通话")
                         }
-                    },
-                ) {
-                    Text(
-                        callStateText(callAudio),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = when {
-                            callAudio.error != null -> colors.danger
-                            callAudio.sending && callAudio.receiving -> colors.success
-                            else -> colors.ink3
-                        },
-                    )
+                        MicButton(
+                            open = micOpen,
+                            onClick = {
+                                // 每次展开都重新枚举：插拔 USB 麦之后不用重启程序。
+                                if (!micOpen) {
+                                    micDevices = runCatching { AudioInputs.list() }
+                                        .getOrDefault(emptyList())
+                                }
+                                micOpen = !micOpen
+                            },
+                        )
+                    }
+                    // 通话状态那一行：**只在通话开着或出错时**出现（用户口径：删掉
+                    // 「未开启（对端听不到你）」那句话 —— 按钮本身已经写明状态）。
+                    if (callAudio.requested || callAudio.error != null) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            callStateText(callAudio),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when {
+                                callAudio.error != null -> colors.danger
+                                callAudio.sending && callAudio.receiving -> colors.success
+                                else -> colors.ink3
+                            },
+                        )
+                    }
                     Spacer(Modifier.height(4.dp))
                     // 两路音量：本机麦克风增益 + 对端声音。与安卓端同一条口径 ——
                     // 它们都是本机自己的输出/输入，与「谁控制播放」无关，所以始终可调。
@@ -927,10 +960,44 @@ private fun VolumeRow(
 }
 
 /**
- * 「麦克风」那颗按钮（2026-11-12 用户口径：放在「开启通话」左边）。
+ * 「复制成功！」小气泡（2026-11-12 用户口径：点复制后右边浮出来一下）。
+ *
+ * 为什么单独抽成一个函数：调用点在 `Row` 里面，`RowScope.AnimatedVisibility` 会盖住
+ * 同名的顶层重载，编译器报「cannot be called in this context with an implicit receiver」。
+ * 放到文件级之后没有 RowScope 了，解析到的就是那个普通重载。
+ */
+@Composable
+private fun CopyToast(visible: Boolean, modifier: Modifier = Modifier) {
+    val colors = LocalCinemaColors.current
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(Motion.curve(Motion.MICRO)) +
+            slideInHorizontally(Motion.curve(Motion.MICRO)) { -6 },
+        exit = fadeOut(Motion.curve(Motion.MICRO, Motion.exit)),
+        modifier = modifier,
+    ) {
+        Text(
+            "复制成功！",
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.accent,
+            maxLines = 1,
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(colors.surface)
+                .padding(horizontal = 8.dp, vertical = 3.dp),
+        )
+    }
+}
+
+/**
+ * 「麦克风」那颗按钮（2026-11-12 用户口径：与「开启通话」并排，后者在前）。
  *
  * 只负责**开关**列表；列表本身画在卡片里（见 [MicInputList]）—— 用 `DropdownMenu`
  * 会是一个独立弹出窗口、宽度按内容走，侧栏装不下（用户报「宽度不足以显示」）。
+ *
+ * 文字颜色固定用 `accent`：它和旁边那颗 `OutlinedButton` 的内容色**一样**
+ * （`scheme()` 里 `primary = colors.accent`），两颗并排才不会一大一小两种颜色。
+ * 「展开中」只由描边表示。
  */
 @Composable
 private fun MicButton(open: Boolean, onClick: () -> Unit) {
@@ -939,7 +1006,7 @@ private fun MicButton(open: Boolean, onClick: () -> Unit) {
         onClick = onClick,
         border = BorderStroke(1.dp, if (open) colors.accent else colors.line2),
     ) {
-        Text("麦克风", color = if (open) colors.accent else colors.ink)
+        Text("麦克风", color = colors.accent)
     }
 }
 

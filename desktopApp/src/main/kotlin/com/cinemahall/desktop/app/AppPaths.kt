@@ -12,6 +12,7 @@ import java.io.File
  *   data/                 ← 首次启动时创建；不随 zip 分发
  *     library.json        ← 根目录 + 时长缓存
  *     settings.json
+ *     window.json         ← 上次关闭时的窗口位置与大小（见 `WindowBounds`）
  *     credentials.json    ← 账号 token（默认 profile；其它 profile 为 credentials-<名>.json）
  *     logs/app.log
  *     app-default.lock
@@ -41,6 +42,14 @@ object AppPaths {
     val libraryFile: File = File(dataDir, "library.json")
 
     val settingsFile: File = File(dataDir, "settings.json")
+
+    /**
+     * 窗口矩形（像素）。**故意不放进 `settings.json`**：那份文件会有好几条
+     * `settings.copy(...)` 的写入路径（信令地址、昵称、音量……），其中任何一条拿着
+     * 启动时的快照都能把窗口位置覆盖回去（实测就这样丢过一次）。单独一个文件之后，
+     * 这条链路与界面设置互不影响。
+     */
+    val windowFile: File = File(dataDir, "window.json")
 
     fun lockFile(profile: String): File = File(dataDir, "app-$profile.lock")
 
