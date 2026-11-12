@@ -27,7 +27,7 @@ import kotlinx.coroutines.flow.update
  * 就截断），这是增益本身的物理限制 —— 所以界面只在用户明确往上拖时才给到 2.0，
  * 默认仍是 1.0。只有桌面端放宽：Android 侧的同名端口仍是 0..1。
  */
-const val MAX_MIC_GAIN: Float = 2f
+const val MAX_MIC_GAIN: Float = com.cinemahall.core.rtc.CallAudioState.MAX_MIC_GAIN
 
 /**
  * [PeerLink] 的 Windows 实现 —— **W7 C1：状态机骨架**。

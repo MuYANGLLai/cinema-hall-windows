@@ -307,7 +307,9 @@ class CinemaHandler(
      * 「0」在这一层就是静音（各平台怎么实现见 [CallAudio.setMicVolume]）。
      */
     override fun setMicVolume(volume: Float) {
-        val clamped = volume.coerceIn(0f, 1f)
+        // 上限读共享常量（桌面端可到 200%，见 `CallAudioState.MAX_MIC_GAIN`）。
+        // 这里原先写死 1f，于是界面拖过 100% 会被夹回来并读回 1.0 = 滑块弹回。
+        val clamped = volume.coerceIn(0f, CallAudioState.MAX_MIC_GAIN)
         val wasOn = micVolumePreference > 0.001f
         micVolumePreference = clamped
         idleCallAudio.update { it.copy(micVolume = clamped) }

@@ -111,6 +111,9 @@ fun PlayerPane(
 
     DisposableEffect(surface) {
         target.attachSurface(surface)
+        // 切页幕布要知道画面在哪：注册之后它就能在离开影厅页的那一瞬间盖住这块矩形
+        // （见 `PlayerCurtain`）。幂等，重复注册没有副作用。
+        (surface as? AwtPlaybackSurface)?.let { PlayerCurtain.register(it.canvas) }
         // 回到页面时兜底：如果视频输出在切页过程中丢了，libVLC 会停在 STOPPED/ENDED
         // 而 `requestedPlaying` 仍是 true（引擎那边也认为在播）。此时把播放器重新
         // 叫起来 —— 只对「意图在播」的机器做，暂停中的机器不受影响。

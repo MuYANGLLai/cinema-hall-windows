@@ -347,10 +347,17 @@ fun AppRoot(
      */
     fun goTo(next: Screen) {
         if (screen == Screen.Cinema && next != Screen.Cinema) {
+            // 顺序有讲究：**先落幕布**（深色原生小窗盖住画面区），再挪画面。
+            // 反过来做，腾空的那一帧就只能靠 Skia 及时重画 —— 本机能过（白 0.01%），
+            // 用户机器上仍然闪白，说明那一帧没画到。幕布把这件事变成确定的。
+            PlayerCurtain.cover()
             hidePlayer = true
             scope.launch {
                 delay(60)
                 screen = next
+                // 新页画出来之后再把幕布挪走。90ms ≈ 5 帧，看不出这层深色。
+                delay(90)
+                PlayerCurtain.release()
             }
         } else {
             // 回影厅时两件事同一帧做掉：否则会先看到「空的内容区」再看到画面。

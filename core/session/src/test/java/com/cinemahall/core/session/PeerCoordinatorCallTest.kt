@@ -245,6 +245,31 @@ class PeerCoordinatorCallTest {
     }
 
     /**
+     * 超过 100% 的麦克风增益**不能被夹回去**（2026-11-12 用户报「拖不到 100% 以上」）。
+     *
+     * 原先这一层（以及 `CinemaHandler` 那一层）都写死 `coerceIn(0f, 1f)`：界面把 1.5
+     * 发下来，被夹成 1.0 再读回去 —— 滑块一过 100% 就弹回原位，用户看到的就是
+     * 「只能在 100% 内调节」。上限必须与界面同源（`CallAudioState.MAX_MIC_GAIN`）。
+     */
+    @Test
+    fun 麦克风增益可以超过百分百() = runBlocking {
+        val rtc = FakePeerLink()
+        val signaler = FakeSignaler()
+        val coordinator = newCoordinator(rtc, signaler)
+        bindPeer(coordinator, signaler)
+        rtc.micVolumes.clear()
+
+        coordinator.setMicVolume(1.5f)
+
+        assertEquals("链路收到的必须还是 1.5，不能夹成 1.0", listOf(1.5f), rtc.micVolumes)
+        assertEquals("界面读回 1.5 才拖得动", 1.5f, coordinator.callAudio.value.micVolume)
+
+        // 上限本身也要在：2.0 之上仍然夹回 2.0（否则推到 3 倍会失真得更厉害）。
+        coordinator.setMicVolume(3f)
+        assertEquals(2f, coordinator.callAudio.value.micVolume)
+    }
+
+    /**
      * 新链路上要自动带上用户早就调好的音量（先调音量、后有人进房）。
      */
     @Test

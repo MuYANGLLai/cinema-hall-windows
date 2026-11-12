@@ -404,7 +404,9 @@ class PeerCoordinator(
      * 与 [setCallVolume] 同一条规矩：**意图存在本层**，链路只报测量值。
      */
     override fun setMicVolume(volume: Float) {
-        val clamped = volume.coerceIn(0f, 1f)
+        // 与 `CinemaHandler.setMicVolume` 同一个上限（桌面端 200%）。这两层任何一处
+        // 写死 1f，界面上就会出现「拖过 100% 立刻弹回去」。
+        val clamped = volume.coerceIn(0f, com.cinemahall.core.rtc.CallAudioState.MAX_MIC_GAIN)
         micVolumeIntent = clamped
         for (link in _links.value.values) link.setMicVolume(clamped)
         publishCallAudio()

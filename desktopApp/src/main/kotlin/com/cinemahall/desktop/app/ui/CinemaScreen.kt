@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -606,13 +607,29 @@ private fun HallPanel(
                 }
 
                 Spacer(Modifier.height(10.dp))
+                // 麦克风输入源：**在卡片内展开**，不做弹出菜单。
+                // 侧栏只有 300dp 出头，`DropdownMenu` 是个独立窗口、会按内容宽度往右
+                // 铺开，于是菜单一半落在侧栏外面（2026-11-12 用户报「宽度不足以显示」）。
+                // 改成卡片内的一列之后，宽度天然被侧栏约束，长设备名也不会溢出。
+                var micOpen by remember { mutableStateOf(false) }
+                var micDevices by remember { mutableStateOf<List<AudioInputDevice>>(emptyList()) }
                 HallCard(
                     title = "通话",
                     // 与安卓简洁模式一致：开关就在标题右边，不占额外一行。
                     // 2026-11-12 用户口径：开关**左边**加一颗「麦克风」，点开下拉选输入源。
                     trailing = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            MicInputPicker(selected = micInput, onSelect = onSelectMicInput)
+                            MicButton(
+                                open = micOpen,
+                                onClick = {
+                                    // 每次展开都重新枚举：插拔 USB 麦之后不用重启程序。
+                                    if (!micOpen) {
+                                        micDevices = runCatching { AudioInputs.list() }
+                                            .getOrDefault(emptyList())
+                                    }
+                                    micOpen = !micOpen
+                                },
+                            )
                             Spacer(Modifier.width(8.dp))
                             OutlinedButton(
                                 onClick = { module.handler.setCallEnabled(!callAudio.requested, "影厅面板") },
@@ -645,6 +662,17 @@ private fun HallPanel(
                         icon = AppIcon.Mic,
                         range = 0f..MAX_MIC_GAIN,
                     ) { module.handler.setMicVolume(it) }
+                    if (micOpen) {
+                        Spacer(Modifier.height(8.dp))
+                        MicInputList(
+                            selected = micInput,
+                            devices = micDevices,
+                            onSelect = { name ->
+                                micOpen = false
+                                onSelectMicInput(name)
+                            },
+                        )
+                    }
                     VolumeRow(
                         label = "接收音量",
                         value = callAudio.volume,
@@ -820,53 +848,85 @@ private fun VolumeRow(
 }
 
 /**
- * 「麦克风」下拉：选采集设备（2026-11-12 用户口径）。
+ * 「麦克风」那颗按钮（2026-11-12 用户口径：放在「开启通话」左边）。
  *
- * 设备列表**每次点开都重新枚举**：插拔 USB 麦之后不用重启程序。枚举失败/没有设备时
- * 依然给出「系统默认」一项 —— 绝不能出现「点了没反应」。
+ * 只负责**开关**列表；列表本身画在卡片里（见 [MicInputList]）—— 用 `DropdownMenu`
+ * 会是一个独立弹出窗口、宽度按内容走，侧栏装不下（用户报「宽度不足以显示」）。
  */
 @Composable
-private fun MicInputPicker(selected: String?, onSelect: (String?) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    var devices by remember { mutableStateOf<List<AudioInputDevice>>(emptyList()) }
-    Box {
-        OutlinedButton(onClick = {
-            devices = runCatching { AudioInputs.list() }.getOrDefault(emptyList())
-            open = true
-        }) {
-            Text("麦克风")
+private fun MicButton(open: Boolean, onClick: () -> Unit) {
+    val colors = LocalCinemaColors.current
+    OutlinedButton(
+        onClick = onClick,
+        border = BorderStroke(1.dp, if (open) colors.accent else colors.line2),
+    ) {
+        Text("麦克风", color = if (open) colors.accent else colors.ink)
+    }
+}
+
+/**
+ * 麦克风输入源列表：**卡片内的一列**，宽度天然被侧栏约束。
+ *
+ * 设备名可能很长（"麦克风阵列 (Realtek(R) Audio)" 这类），所以：
+ * ① 每行 `maxLines = 1` + 省略号，绝不撑宽侧栏；
+ * ② 整个列表最多 168dp 高、内部滚动 —— 虚拟设备多的机器也不会把卡片顶穿。
+ */
+@Composable
+private fun MicInputList(
+    selected: String?,
+    devices: List<AudioInputDevice>,
+    onSelect: (String?) -> Unit,
+) {
+    val colors = LocalCinemaColors.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = 168.dp)
+            .verticalScroll(rememberScrollState())
+            .background(colors.surface2, RoundedCornerShape(8.dp))
+            .padding(vertical = 4.dp),
+    ) {
+        MicInputRow("系统默认", selected.isNullOrBlank()) { onSelect(null) }
+        devices.forEach { device ->
+            MicInputRow(device.label, device.name == selected) { onSelect(device.name) }
         }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            DropdownMenuItem(
-                text = { Text("系统默认") },
-                onClick = { open = false; onSelect(null) },
-                trailingIcon = { if (selected.isNullOrBlank()) CheckMarkDot() },
+        if (devices.isEmpty()) {
+            Text(
+                "没找到可用的麦克风",
+                color = colors.ink3,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
             )
-            devices.forEach { device ->
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            device.label,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    },
-                    onClick = { open = false; onSelect(device.name) },
-                    trailingIcon = { if (device.name == selected) CheckMarkDot() },
-                )
-            }
-            if (devices.isEmpty()) {
-                DropdownMenuItem(
-                    text = { Text("没找到可用的麦克风", color = LocalCinemaColors.current.ink3) },
-                    onClick = { open = false },
-                    enabled = false,
-                )
-            }
         }
     }
 }
 
-/** 下拉里表示「当前选中的就是这条」的小圆点（不用 ✓ 字体字形，与项目图标口径一致）。 */
+@Composable
+private fun MicInputRow(label: String, selected: Boolean, onClick: () -> Unit) {
+    val colors = LocalCinemaColors.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            color = if (selected) colors.accent else colors.ink2,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        if (selected) {
+            Spacer(Modifier.width(6.dp))
+            CheckMarkDot()
+        }
+    }
+}
+
+/** 列表里表示「当前选中的就是这条」的小圆点（不用 ✓ 字形，与项目图标口径一致）。 */
 @Composable
 private fun CheckMarkDot() {
     val colors = LocalCinemaColors.current

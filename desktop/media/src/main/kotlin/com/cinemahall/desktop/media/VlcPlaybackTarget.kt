@@ -56,6 +56,24 @@ class VlcPlaybackTarget(
     @Volatile
     private var mediaLoaded = false
 
+    /**
+     * 「正在装片」（`prepare()` 还没返回）。
+     *
+     * 2026-11-12 起 `prepare()` 跑在 [control] 线程上，不再占 EDT：大文件在网络盘上
+     * 打开要几百毫秒到几秒，占着 EDT 就等于「选完片界面先僵住，点播放没反应」。
+     */
+    @Volatile
+    private var preparing = false
+
+    /**
+     * 「用户在装片期间按了播放」。
+     *
+     * 有了它，点播放这一下**立刻**被受理：记下意图，等 `prepare()` 一返回就接着起播，
+     * 不重开、不丢位置。用户要的就是「选好片立马按播放就能开播」
+     * （2026-11-12 用户口径），而不是等装片装完才认这一下。
+     */
+    private val pendingPlay = AtomicBoolean(false)
+
     @Volatile
     private var currentUri: String? = null
 
@@ -259,44 +277,132 @@ class VlcPlaybackTarget(
 
     // ── 动作 ────────────────────────────────────────────────────────────────
 
+    /**
+     * 装片。**不阻塞调用线程**（2026-11-12 用户口径：选好片要能立刻按播放）。
+     *
+     * ── 为什么把 `prepare()` 挪到 [control] 线程 ─────────────────────────────────
+     * `prepare()` 要等解复用读到轨道表才返回。本机上的 MKV 只要几十毫秒，但大文件 /
+     * 网络盘可以到几百毫秒甚至几秒。它原来跑在 EDT 上（`PlayerPane` 的 effect 里），
+     * 这段时间界面是**僵的**：按钮按不动、画面不刷新 —— 用户看到的就是「选完片
+     * 好一会儿才有反应，点播放也不理人」。挪走之后界面一直活着，装片在后台做完。
+     *
+     * 顺序仍然有保证：[control] 是单线程，之后的 seek / play 都排在它后面。
+     */
     override fun setMediaItem(ref: MediaRef) {
         errorText = null
         mediaPrepared = false
+        mediaLoaded = false
         currentUri = ref.uri
         aspectRatio = null
         subtitleIds = emptyList()
         subtitleNames = emptyList()
         pending.clearSeek()
         pending.clearSubtitle()
-        // prepare 而不是 play：起播由引擎的 play() 触发；这里先让 VLC 解析轨道表，
-        // 界面才能在“已选片、未开播”的窗口里显示时长与字幕轨。
-        val ok = runCatching { player.media().prepare(ref.uri) }
-            .onFailure {
-                errorText = "打不开片源：${ref.displayName}"
-                listeners.forEach { l -> l.onPlaybackError(errorText) }
+        pendingPlay.set(false)
+        preparing = true
+        control.execute {
+            if (closed.get() || currentUri != ref.uri) {
+                // 已经被更新的选片顶掉（连点两部片）：这一份不再装。
+                return@execute
             }
-            .getOrDefault(false)
-        mediaLoaded = ok
-        log("[vlc] prepare(${ref.uri}) -> $ok")
+            // prepare 而不是 play：起播由 [play] 触发；这里先让 VLC 解析轨道表，
+            // 界面才能在「已选片、未开播」的窗口里显示时长与字幕轨。
+            val startedAt = System.nanoTime()
+            val ok = runCatching { player.media().prepare(ref.uri) }
+                .onFailure {
+                    errorText = "打不开片源：${ref.displayName}"
+                    listeners.forEach { l -> l.onPlaybackError(errorText) }
+                }
+                .getOrDefault(false)
+            mediaLoaded = ok
+            preparing = false
+            val cost = (System.nanoTime() - startedAt) / 1_000_000
+            log("[vlc] prepare(${ref.uri}) -> $ok（${cost}ms，control 线程）")
+            // 用户已经在装片期间按过播放：现在就起播，不重开、不丢位置。
+            if (ok && pendingPlay.compareAndSet(true, false)) {
+                startAfterPrepare()
+            }
+        }
+    }
+
+    /**
+     * 装片完成后的「补起播」。
+     *
+     * ── 为什么不能只调一次 `controls().play()`（2026-11-12 实测）───────────────
+     * `prepare()` 刚返回时输入线程可能还在 `OPENING`，此时 `play()` 会被拒
+     * （日志实证 `ok=false`，之后状态一直是 `STOPPED`，画面永远不出来）。
+     * 所以这里重试几次；仍然不行就整条重开 —— 这条路径上位置本来就是 0，
+     * 重开的代价只有一次解复用（~80ms），比「按了播放没反应」好得多。
+     */
+    private fun startAfterPrepare() {
+        if (tryStartPlayback()) {
+            log("[vlc] 装片完成，补一次起播成功")
+            return
+        }
+        val uri = currentUri
+        if (uri == null) {
+            log("[vlc] 装片后起播失败：没有当前片源")
+            return
+        }
+        val ok = runCatching { player.media().play(uri) }
+            .onFailure { log("[vlc] 重开片源也失败：${it.message}") }
+            .isSuccess
+        log("[vlc] 装片后 controls().play() 一直不通，改为整条重开 ok=$ok")
+    }
+
+    /**
+     * 反复试 `controls().play()` 直到不被拒。**必须在 [control] 线程上调用**（会 sleep）。
+     *
+     * 被拒的典型原因：`prepare()` 刚返回时输入线程还在 `OPENING`，或视频表面正在
+     * 重新挂载（"The video surface component must be displayable"）—— 实测 40ms 后
+     * 再试就成功了。
+     */
+    private fun tryStartPlayback(retries: Int = 8): Boolean {
+        repeat(retries) { attempt ->
+            val failure = runCatching { player.controls().play() }.exceptionOrNull()
+            if (failure == null) return true
+            if (attempt == 0) log("[vlc] play() 被拒：${failure.message}（重试中）")
+            Thread.sleep(40)
+        }
+        return false
     }
 
     override fun play() {
         requestedPlaying = true
-        // ① 已经起播过：续播。
+        // ① 正在装片（`prepare()` 还没返回）：**立刻受理**这一下，装完就起播。
+        //    排队而不是丢弃 —— 用户点播放的意图不能被一段 I/O 等没
+        //    （2026-11-12 用户口径：「选好片立马点播放就能开播」）。
+        if (preparing) {
+            pendingPlay.set(true)
+            log("[vlc] play 请求命中「正在装片」：排队，装完即起播")
+            return
+        }
+        // ② 已经起播过：续播。
         if (mediaPrepared) {
             runCatching { player.controls().setPause(false) }
                 .recoverCatching { player.controls().play() }
             return
         }
-        // ② 还没起播，但媒体已经装载（界面 `prepare()` 过）：直接起播，**不重开**。
+        // ③ 还没起播，但媒体已经装载（`prepare()` 过）：直接起播，**不重开**。
         //    旧写法一律走 `media().play(uri)`，那会把位置打回 0、并在大文件上重新解析
         //    索引；它如果落在 EDT 上，整界面就冻住（2026-11-06 真机「卡死」的一半原因）。
+        //    ⚠️ 重试放在 [control] 上：`controls().play()` 在输入还 OPENING、或视频表面
+        //    正在重挂时会抛 "The video surface component must be displayable"，
+        //    隔 40ms 再试就好 —— 但这个 sleep 绝不能落在 EDT 上。
         if (mediaLoaded) {
-            val ok = runCatching { player.controls().play() }.isSuccess
-            log("[vlc] play(before ready) → controls().play()（不重开，位置保留） ok=$ok")
-            if (ok) return
+            control.execute {
+                if (closed.get()) return@execute
+                if (tryStartPlayback()) {
+                    log("[vlc] play → controls().play() 成功（不重开，位置保留）")
+                    return@execute
+                }
+                val fallback = currentUri ?: return@execute
+                val ok = runCatching { player.media().play(fallback) }.isSuccess
+                log("[vlc] play → controls().play() 一直不通，整条重开 ok=$ok")
+            }
+            return
         }
-        // ③ 连媒体都没有：只能整条重开，且必须在控制线程上跑（见 [control]）。
+        // ④ 连媒体都没有：只能整条重开，且必须在控制线程上跑（见 [control]）。
         val uri = currentUri ?: return
         control.execute {
             if (closed.get()) return@execute

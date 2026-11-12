@@ -463,6 +463,10 @@ fun main(args: Array<String>) {
                 // 浅色容器改深（见 `Backdrops`）：进影厅页才会造出来的那两层白底
                 // 要等它出现，所以是「现在扫一次 + 之后盯 8 秒 + 每次窗口尺寸变化补扫」。
                 com.cinemahall.desktop.app.ui.Backdrops.watch(composeWindow) { backdrop }
+                // 切页幕布：这里一定拿得到顶层 Window（`PlayerPane` 的 effect 时刻
+                // `getWindowAncestor` 可能还是 null）。创建 + 首帧预热都在这里做掉，
+                // 之后切页只是把它移进/移出画面区（见 `PlayerCurtain`）。
+                com.cinemahall.desktop.app.ui.PlayerCurtain.attach(composeWindow)
             }
             // 原生接管后 `maximized` 由系统发起（贴边吸附/双击/Win+↑）：`WindowChrome`
             // 自己挂了 `componentResized` 去刷 `IsZoomed`，这里不用再管。
